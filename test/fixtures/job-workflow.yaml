@@ -1,0 +1,40 @@
+# 工作流作业示例：ML 训练流水线
+name: "ml-training-pipeline"
+type: workflow
+owner_id: "node-user-1"
+max_retries: 3
+stages:
+  - name: download
+    image: "user/data-fetcher:v1"
+    resources:
+      cpu: 1
+      memory: 2GB
+    outputs: ["/data/raw"]
+
+  - name: preprocess
+    image: "user/preprocessor:v1"
+    depends_on: ["download"]
+    split:
+      strategy: by_file
+      input: "/data/raw/*.csv"
+    resources:
+      cpu: 2
+      memory: 4GB
+    outputs: ["/data/processed"]
+    max_concurrency: 10
+
+  - name: train
+    image: "user/trainer:v1"
+    depends_on: ["preprocess"]
+    resources:
+      cpu: 8
+      memory: 16GB
+      gpu: 8GB
+    max_concurrency: 1
+
+  - name: evaluate
+    image: "user/evaluator:v1"
+    depends_on: ["train"]
+    resources:
+      cpu: 1
+      memory: 2GB

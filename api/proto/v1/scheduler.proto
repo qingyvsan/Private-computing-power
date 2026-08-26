@@ -1,0 +1,268 @@
+syntax = "proto3";
+package computingpower.v1;
+
+option go_package = "computing-power/proto/v1";
+
+import "v1/common.proto";
+
+// ========== 调度器服务 ==========
+service Scheduler {
+  // 节点管理
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+  rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
+  rpc UnregisterNode(UnregisterNodeRequest) returns (UnregisterNodeResponse);
+
+  // 作业管理 (CLI -> 调度器)
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+  rpc WatchJob(WatchJobRequest) returns (stream JobEvent);
+
+  // 任务分配 (调度器 -> Agent)
+  rpc AssignUnit(AssignUnitRequest) returns (AssignUnitResponse);
+  rpc ReportUnitStatus(stream UnitStatusReport) returns (UnitStatusAck);
+
+  // 信任管理
+  rpc DeclareTrust(DeclareTrustRequest) returns (DeclareTrustResponse);
+  rpc RevokeTrust(RevokeTrustRequest) returns (RevokeTrustResponse);
+  rpc GetTrustGraph(GetTrustGraphRequest) returns (GetTrustGraphResponse);
+
+  // 证书管理 (内置 CA)
+  rpc IssueCertificate(IssueCertRequest) returns (IssueCertResponse);
+  rpc RenewCertificate(RenewCertRequest) returns (RenewCertResponse);
+  rpc RevokeCertificate(RevokeCertRequest) returns (RevokeCertResponse);
+
+  // 邀请码
+  rpc CreateInviteCode(CreateInviteCodeRequest) returns (CreateInviteCodeResponse);
+  rpc RedeemInviteCode(RedeemInviteCodeRequest) returns (RedeemInviteCodeResponse);
+
+  // 节点查询
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+}
+
+// ========== 节点管理消息 ==========
+
+message RegisterNodeRequest {
+  string name = 1;
+  bytes public_key = 2;
+  string hardware_fingerprint = 3;
+  string invite_code = 4;
+  string version = 5;
+  NodeResources initial_resources = 6;
+}
+
+message RegisterNodeResponse {
+  string node_id = 1;
+  string overlay_ip = 2;
+  bytes nebula_certificate = 3;
+  string nebula_config = 4;
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  NodeResources resources = 2;
+  repeated string running_units = 3;
+  repeated Unit unit_deltas = 4;
+}
+
+message HeartbeatResponse {
+  int64 server_time = 1;
+  repeated Command commands = 2;
+}
+
+message UnregisterNodeRequest {
+  string node_id = 1;
+  string reason = 2;
+}
+
+message UnregisterNodeResponse {
+  bool success = 1;
+}
+
+// ========== 作业管理消息 ==========
+
+message SubmitJobRequest {
+  Job job = 1;
+}
+
+message SubmitJobResponse {
+  string job_id = 1;
+  JobStatus status = 2;
+  string message = 3;
+}
+
+message CancelJobRequest {
+  string job_id = 1;
+  string node_id = 2;
+}
+
+message CancelJobResponse {
+  bool success = 1;
+}
+
+message GetJobRequest {
+  string job_id = 1;
+}
+
+message GetJobResponse {
+  Job job = 1;
+}
+
+message ListJobsRequest {
+  string node_id = 1;
+  JobStatus status_filter = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListJobsResponse {
+  repeated Job jobs = 1;
+  int32 total_count = 2;
+  string next_page_token = 3;
+}
+
+message WatchJobRequest {
+  string job_id = 1;
+}
+
+// ========== 任务分配消息 ==========
+
+message AssignUnitRequest {
+  Unit unit = 1;
+  string image = 2;
+  ResourceSpec resources = 3;
+  map<string, string> env = 4;
+  repeated string mounts = 5;
+  GPUConfig gpu_config = 6;
+}
+
+message AssignUnitResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+message UnitStatusReport {
+  string unit_id = 1;
+  string node_id = 2;
+  UnitStatus status = 3;
+  int32 exit_code = 4;
+  string error_message = 5;
+  bytes output = 6;
+}
+
+message UnitStatusAck {
+  bool received = 1;
+}
+
+// ========== 信任管理消息 ==========
+
+message DeclareTrustRequest {
+  string target_node_id = 1;
+  bytes signature = 2;
+  int64 expires_at = 3;
+}
+
+message DeclareTrustResponse {
+  bool success = 1;
+}
+
+message RevokeTrustRequest {
+  string target_node_id = 1;
+  bytes signature = 2;
+}
+
+message RevokeTrustResponse {
+  bool success = 1;
+}
+
+message GetTrustGraphRequest {
+  string node_id = 1;
+}
+
+message GetTrustGraphResponse {
+  repeated TrustEdge edges = 1;
+}
+
+// ========== 证书管理消息 ==========
+
+message IssueCertRequest {
+  bytes public_key = 1;
+  string node_id = 2;
+  string group = 3;
+  string ips = 4;
+  string subnets = 5;
+}
+
+message IssueCertResponse {
+  bytes certificate = 1;
+  bytes ca_certificate = 2;
+  int64 expires_at = 3;
+}
+
+message RenewCertRequest {
+  string node_id = 1;
+  bytes public_key = 2;
+}
+
+message RenewCertResponse {
+  bytes certificate = 1;
+  int64 expires_at = 2;
+}
+
+message RevokeCertRequest {
+  string node_id = 1;
+  string reason = 2;
+}
+
+message RevokeCertResponse {
+  bool success = 1;
+}
+
+// ========== 邀请码消息 ==========
+
+message CreateInviteCodeRequest {
+  string node_id = 1;
+  int64 expires_at = 2;
+  int32 max_uses = 3;
+}
+
+message CreateInviteCodeResponse {
+  string code = 1;
+  int64 expires_at = 2;
+}
+
+message RedeemInviteCodeRequest {
+  string code = 1;
+  string node_id = 2;
+  bytes public_key = 3;
+  string hardware_fingerprint = 4;
+}
+
+message RedeemInviteCodeResponse {
+  bool valid = 1;
+  string message = 2;
+}
+
+// ========== 节点查询消息 ==========
+
+message ListNodesRequest {
+  NodeStatus status_filter = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListNodesResponse {
+  repeated Node nodes = 1;
+  int32 total_count = 2;
+  string next_page_token = 3;
+}
+
+message GetNodeRequest {
+  string node_id = 1;
+}
+
+message GetNodeResponse {
+  Node node = 1;
+}

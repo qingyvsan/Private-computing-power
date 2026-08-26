@@ -1,0 +1,67 @@
+# 节点 Agent 配置
+agent:
+  id: ""
+  name: ""
+  data_dir: "./data/agent"
+  temp_dir: "./tmp/agent"
+
+scheduler:
+  address: "localhost:9090"
+  reconnect_initial: "1s"
+  reconnect_max: "60s"
+  reconnect_multiplier: 2.0
+
+heartbeat:
+  interval: "3s"
+  jitter: "0.5s"
+  full_report_interval: "60s"
+  include_running_tasks: true
+
+containerd:
+  socket: "/run/containerd/containerd.sock"
+  namespace: "computing-power"
+  snapshotter: "overlayfs"
+  pull_timeout: "10m"
+  dragonfly_proxy: true
+
+kata:
+  enabled: false
+  runtime_class: "kata-qemu"
+  config_path: "/etc/kata-containers/configuration.toml"
+
+hami:
+  enabled: false
+  lib_path: "/usr/lib/libvgpu.so"
+  config_dir: "./data/agent/hami"
+  default_memory_mb: 1024
+  default_cores: 10
+
+resources:
+  collect_interval: "10s"
+  report_gpu: true
+  report_network: true
+  network_probe_interval: "30s"
+
+nebula:
+  config_path: "./data/agent/nebula/config.yaml"
+  binary_path: "nebula"
+  data_dir: "./data/agent/nebula"
+  cert_dir: "./data/agent/nebula/certs"
+
+sync:
+  enabled: false
+  wal_dir: "./data/agent/wal"
+  checkpoint_interval: "5m"
+  sync_bandwidth_mbps: 100
+  compression: "zstd"
+
+updater:
+  enabled: false
+  check_interval: "6h"
+  download_dir: "./data/agent/updates"
+  backup_count: 2
+
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"

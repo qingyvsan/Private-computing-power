@@ -1,0 +1,10 @@
+# 单体作业示例：长驻推理服务
+name: "my-inference-service"
+type: single
+image: "user/llm-server:v1"
+resources:
+  cpu: 4
+  memory: 16GB
+  gpu: 8GB
+strategy: long_running
+failure_policy: auto_retry

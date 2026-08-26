@@ -1,0 +1,18 @@
+# 聚合作业示例：批量视频转码
+name: "batch-video-transcode"
+type: aggregate
+image: "user/transcoder:v2"
+resources:
+  cpu: 2
+  memory: 4GB
+stages:
+  - name: transcode
+    split:
+      strategy: by_file
+      input: "oss://videos/*.mp4"
+    resources:
+      cpu: 2
+      memory: 4GB
+    max_concurrency: 20
+failure_policy: auto_retry
+max_retries: 3

@@ -1,0 +1,243 @@
+syntax = "proto3";
+package computingpower.v1;
+
+option go_package = "computing-power/proto/v1";
+
+// ========== 枚举 ==========
+
+enum NodeStatus {
+  NODE_STATUS_UNSPECIFIED = 0;
+  NODE_STATUS_ONLINE = 1;
+  NODE_STATUS_OFFLINE = 2;
+  NODE_STATUS_BUSY = 3;
+  NODE_STATUS_UNHEALTHY = 4;
+  NODE_STATUS_SUSPENDED = 5;
+}
+
+enum JobType {
+  JOB_TYPE_UNSPECIFIED = 0;
+  JOB_TYPE_SINGLE = 1;
+  JOB_TYPE_AGGREGATE = 2;
+  JOB_TYPE_WORKFLOW = 3;
+}
+
+enum JobStatus {
+  JOB_STATUS_UNSPECIFIED = 0;
+  JOB_STATUS_PENDING = 1;
+  JOB_STATUS_RUNNING = 2;
+  JOB_STATUS_COMPLETED = 3;
+  JOB_STATUS_FAILED = 4;
+  JOB_STATUS_CANCELLED = 5;
+}
+
+enum UnitStatus {
+  UNIT_STATUS_UNSPECIFIED = 0;
+  UNIT_STATUS_PENDING = 1;
+  UNIT_STATUS_ASSIGNED = 2;
+  UNIT_STATUS_RUNNING = 3;
+  UNIT_STATUS_COMPLETED = 4;
+  UNIT_STATUS_FAILED = 5;
+  UNIT_STATUS_TIMEOUT = 6;
+  UNIT_STATUS_RETRYING = 7;
+  UNIT_STATUS_CANCELLED = 8;
+}
+
+enum SplitType {
+  SPLIT_TYPE_UNSPECIFIED = 0;
+  SPLIT_TYPE_BY_FILE = 1;
+  SPLIT_TYPE_BY_RANGE = 2;
+  SPLIT_TYPE_BY_N = 3;
+  SPLIT_TYPE_BY_CUSTOM = 4;
+}
+
+enum StageStatus {
+  STAGE_STATUS_UNSPECIFIED = 0;
+  STAGE_STATUS_PENDING = 1;
+  STAGE_STATUS_RUNNING = 2;
+  STAGE_STATUS_COMPLETED = 3;
+  STAGE_STATUS_FAILED = 4;
+  STAGE_STATUS_SKIPPED = 5;
+}
+
+// ========== 资源类型 ==========
+
+message GPUDevice {
+  string uuid = 1;
+  string model = 2;
+  int64 memory_total_mb = 3;
+  int64 memory_available_mb = 4;
+  double compute_util = 5;
+}
+
+message NetworkMetrics {
+  double rtt_ms = 1;
+  double bandwidth_up_mbps = 2;
+  double bandwidth_down_mbps = 3;
+  double packet_loss = 4;
+  string nat_type = 5;
+}
+
+message NodeResources {
+  double cpu_cores = 1;
+  double cpu_usage = 2;
+  int64 memory_bytes = 3;
+  int64 memory_used = 4;
+  int64 disk_bytes = 5;
+  int64 disk_used = 6;
+  repeated GPUDevice gpus = 7;
+  NetworkMetrics network = 8;
+}
+
+message GPURequest {
+  int64 memory_mb = 1;
+  int32 cores = 2;
+  int32 count = 3;
+}
+
+message NetworkRequirement {
+  int64 min_bandwidth_up_mbps = 1;
+  int64 min_bandwidth_down_mbps = 2;
+  int64 max_latency_ms = 3;
+}
+
+message ResourceSpec {
+  double cpu_cores = 1;
+  int64 memory_bytes = 2;
+  int64 disk_bytes = 3;
+  repeated GPURequest gpus = 4;
+  NetworkRequirement network = 5;
+}
+
+// ========== 拆分策略 ==========
+
+message ByFileSplit {
+  string input_pattern = 1;
+  repeated string file_list = 2;
+}
+
+message ByRangeSplit {
+  int64 start = 1;
+  int64 end = 2;
+  int32 num_parts = 3;
+}
+
+message ByNSplit {
+  int32 num_parts = 1;
+}
+
+message ByCustomSplit {
+  string script = 1;
+  repeated string args = 2;
+}
+
+message SplitStrategy {
+  SplitType type = 1;
+  ByFileSplit by_file = 2;
+  ByRangeSplit by_range = 3;
+  ByNSplit by_n = 4;
+  ByCustomSplit by_custom = 5;
+}
+
+// ========== 任务模型 ==========
+
+message Unit {
+  string id = 1;
+  string stage_id = 2;
+  string job_id = 3;
+  int32 index = 4;
+  string input = 5;
+  string assigned_node = 6;
+  UnitStatus status = 7;
+  int32 retry_count = 8;
+  int64 started_at = 9;
+  int64 completed_at = 10;
+  int32 exit_code = 11;
+  string error_message = 12;
+  bytes output = 13;
+}
+
+message Stage {
+  string id = 1;
+  string job_id = 2;
+  string name = 3;
+  repeated string depends_on = 4;
+  SplitStrategy split = 5;
+  ResourceSpec resources = 6;
+  repeated string inputs = 7;
+  repeated string outputs = 8;
+  int32 max_concurrency = 9;
+  StageStatus status = 10;
+  repeated Unit units = 11;
+}
+
+message Job {
+  string id = 1;
+  string name = 2;
+  JobType type = 3;
+  string owner_id = 4;
+  string image = 5;
+  ResourceSpec resources = 6;
+  repeated Stage stages = 7;
+  JobStatus status = 8;
+  string failure_policy = 9;
+  int32 max_retries = 10;
+  int64 max_duration_ms = 11;
+  int64 created_at = 12;
+  int64 updated_at = 13;
+  int64 completed_at = 14;
+}
+
+// ========== 信任图 ==========
+
+message TrustEdge {
+  string from_node = 1;
+  string to_node = 2;
+  bytes signature = 3;
+  int64 created_at = 4;
+  int64 expires_at = 5;
+}
+
+// ========== 节点信息 ==========
+
+message Node {
+  string id = 1;
+  string name = 2;
+  string overlay_ip = 3;
+  bytes public_key = 4;
+  NodeStatus status = 5;
+  NodeResources resources = 6;
+  string version = 7;
+  string nat_type = 8;
+  repeated string trust_list = 9;
+  repeated string block_list = 10;
+  string discoverable = 11;
+  int64 registered_at = 12;
+  int64 last_heartbeat = 13;
+  int32 current_tasks = 14;
+  int32 max_tasks = 15;
+  double reputation = 16;
+}
+
+// ========== 调度命令 ==========
+
+message GPUDeviceAllocation {
+  string uuid = 1;
+  int64 memory_mb = 2;
+  int32 cores = 3;
+}
+
+message GPUConfig {
+  repeated GPUDeviceAllocation devices = 1;
+}
+
+message Command {
+  string type = 1;
+  bytes payload = 2;
+}
+
+message JobEvent {
+  string job_id = 1;
+  JobStatus status = 2;
+  string message = 3;
+  int64 timestamp = 4;
+}

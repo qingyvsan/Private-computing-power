@@ -1,0 +1,64 @@
+# 中央调度器配置
+scheduler:
+  id: "scheduler-1"
+  node_id: "scheduler"
+
+server:
+  grpc:
+    listen: "0.0.0.0:9090"
+    max_recv_msg_size: 16777216   # 16MB
+    max_send_msg_size: 16777216
+  http:
+    listen: "0.0.0.0:8080"
+    enabled: false                # 仅用于健康检查
+
+tls:
+  ca_cert: "configs/ca.pem"
+  ca_key: "configs/ca-key.pem"
+
+database:
+  engine: "boltdb"
+  path: "./data/scheduler.db"
+  backup_interval: "24h"
+  backup_dir: "./data/backups"
+
+failure_detection:
+  phi_threshold: 4.0              # 默认 φ=4，误判率约 0.1%
+  min_samples: 100                # 最少 100 个心跳样本才启用检测
+  window_size: 1000               # 滑动窗口大小
+  heartbeat_interval: "3s"
+  heartbeat_timeout: "30s"
+
+scheduler_engine:
+  max_retries: 3
+  reassign_delay: "5s"
+  concurrent_assignments: 100
+  scoring_weights:                # 节点评分权重
+    resource_match: 0.4
+    network_quality: 0.3
+    reputation: 0.2
+    load: 0.1
+
+nebula:
+  ca_cert: "configs/nebula/ca.crt"
+  ca_key: "configs/nebula/ca.key"
+  lighthouse:
+    addr: "0.0.0.0:4242"
+    host: "10.0.0.1"
+  network: "10.1.0.0/16"
+  groups:
+    master: "master"
+    trusted: "trusted"
+    mutual: "mutual"
+    discoverable: "discoverable"
+    default: "default"
+
+invitation:
+  code_length: 32
+  code_expiry: "72h"
+  max_uses_per_code: 1
+
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
