@@ -1,0 +1,369 @@
+package server
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	pb "computing-power/proto/v1"
+	"computing-power/pkg/trustgraph"
+
+	"computing-power/scheduler/internal/config"
+	"computing-power/scheduler/internal/registry"
+	"computing-power/scheduler/internal/store"
+)
+
+func newTestServer(t *testing.T) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		st.Close()
+		os.Remove(path)
+	})
+	reg := registry.NewRegistry(1000, 100, 4.0)
+	srv := New(st, reg, trustgraph.NewGraph(), 3*time.Second, 30*time.Second, config.Default())
+	return srv
+}
+
+func TestSubmitJob_Single(t *testing.T) {
+	srv := newTestServer(t)
+	job := &pb.Job{
+		Name:    "test-single",
+		Type:    pb.JobTypeSingle,
+		OwnerID: "node-1",
+		Image:   "alpine:latest",
+		Stages: []*pb.Stage{
+			{
+				Name: "main",
+				Resources: &pb.ResourceSpec{
+					CPUCores:    1,
+					MemoryBytes: 536870912, // 512MB
+				},
+			},
+		},
+	}
+
+	resp, err := srv.SubmitJob(context.Background(), &pb.SubmitJobRequest{Job: job})
+	if err != nil {
+		t.Fatalf("SubmitJob: %v", err)
+	}
+	if resp.JobID == "" {
+		t.Fatal("expected non-empty job ID")
+	}
+	if resp.Status != pb.JobStatusPending {
+		t.Errorf("expected Pending status, got %v", resp.Status)
+	}
+
+	// Verify job was stored
+	got, err := srv.store.GetJob(resp.JobID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got == nil {
+		t.Fatal("job not found in store")
+	}
+	if got.Name != "test-single" {
+		t.Errorf("expected Name test-single, got %s", got.Name)
+	}
+}
+
+func TestSubmitJob_WithSplit_ByN(t *testing.T) {
+	srv := newTestServer(t)
+	job := &pb.Job{
+		Name:    "test-split",
+		Type:    pb.JobTypeAggregate,
+		OwnerID: "node-1",
+		Stages: []*pb.Stage{
+			{
+				Name: "parallel",
+				Split: &pb.SplitStrategy{
+					Type: pb.SplitTypeByN,
+					ByN:  &pb.ByNSplit{NumParts: 5},
+				},
+			},
+		},
+	}
+
+	resp, err := srv.SubmitJob(context.Background(), &pb.SubmitJobRequest{Job: job})
+	if err != nil {
+		t.Fatalf("SubmitJob: %v", err)
+	}
+
+	// Verify units were created
+	units, err := srv.store.ListUnitsByJob(resp.JobID)
+	if err != nil {
+		t.Fatalf("ListUnitsByJob: %v", err)
+	}
+	if len(units) != 5 {
+		t.Fatalf("expected 5 units, got %d", len(units))
+	}
+	for i, u := range units {
+		if u.Status != pb.UnitStatusPending {
+			t.Errorf("unit %d: expected Pending, got %v", i, u.Status)
+		}
+		if u.JobID != resp.JobID {
+			t.Errorf("unit %d: wrong JobID", i)
+		}
+	}
+}
+
+func TestSubmitJob_WithSplit_ByFile(t *testing.T) {
+	srv := newTestServer(t)
+	job := &pb.Job{
+		Name:    "test-file-split",
+		Type:    pb.JobTypeAggregate,
+		OwnerID: "node-1",
+		Stages: []*pb.Stage{
+			{
+				Name: "process-files",
+				Split: &pb.SplitStrategy{
+					Type: pb.SplitTypeByFile,
+					ByFile: &pb.ByFileSplit{
+						FileList: []string{"a.txt", "b.txt", "c.txt"},
+					},
+				},
+			},
+		},
+	}
+
+	resp, err := srv.SubmitJob(context.Background(), &pb.SubmitJobRequest{Job: job})
+	if err != nil {
+		t.Fatalf("SubmitJob: %v", err)
+	}
+
+	units, err := srv.store.ListUnitsByJob(resp.JobID)
+	if err != nil {
+		t.Fatalf("ListUnitsByJob: %v", err)
+	}
+	if len(units) != 3 {
+		t.Fatalf("expected 3 units, got %d", len(units))
+	}
+}
+
+func TestSubmitJob_WithSplit_ByRange(t *testing.T) {
+	srv := newTestServer(t)
+	job := &pb.Job{
+		Name:    "test-range-split",
+		Type:    pb.JobTypeAggregate,
+		OwnerID: "node-1",
+		Stages: []*pb.Stage{
+			{
+				Name: "process-range",
+				Split: &pb.SplitStrategy{
+					Type: pb.SplitTypeByRange,
+					ByRange: &pb.ByRangeSplit{
+						Start:    0,
+						End:      1000,
+						NumParts: 4,
+					},
+				},
+			},
+		},
+	}
+
+	resp, err := srv.SubmitJob(context.Background(), &pb.SubmitJobRequest{Job: job})
+	if err != nil {
+		t.Fatalf("SubmitJob: %v", err)
+	}
+
+	units, err := srv.store.ListUnitsByJob(resp.JobID)
+	if err != nil {
+		t.Fatalf("ListUnitsByJob: %v", err)
+	}
+	if len(units) != 4 {
+		t.Fatalf("expected 4 units, got %d", len(units))
+	}
+}
+
+func TestSubmitJob_MultipleStages(t *testing.T) {
+	srv := newTestServer(t)
+	job := &pb.Job{
+		Name:    "test-workflow",
+		Type:    pb.JobTypeWorkflow,
+		OwnerID: "node-1",
+		Stages: []*pb.Stage{
+			{
+				Name: "download",
+				Split: &pb.SplitStrategy{
+					Type: pb.SplitTypeByN,
+					ByN:  &pb.ByNSplit{NumParts: 1},
+				},
+			},
+			{
+				Name: "process",
+				DependsOn: []string{"download"},
+				Split: &pb.SplitStrategy{
+					Type: pb.SplitTypeByN,
+					ByN:  &pb.ByNSplit{NumParts: 3},
+				},
+			},
+		},
+	}
+
+	resp, err := srv.SubmitJob(context.Background(), &pb.SubmitJobRequest{Job: job})
+	if err != nil {
+		t.Fatalf("SubmitJob: %v", err)
+	}
+
+	units, err := srv.store.ListUnitsByJob(resp.JobID)
+	if err != nil {
+		t.Fatalf("ListUnitsByJob: %v", err)
+	}
+	if len(units) != 4 {
+		t.Fatalf("expected 4 units (1+3), got %d", len(units))
+	}
+}
+
+func TestGetJob(t *testing.T) {
+	srv := newTestServer(t)
+	// Submit a job first
+	job := &pb.Job{
+		Name:    "test-get",
+		Type:    pb.JobTypeSingle,
+		OwnerID: "node-1",
+		Stages: []*pb.Stage{
+			{Name: "main"},
+		},
+	}
+	submitResp, err := srv.SubmitJob(context.Background(), &pb.SubmitJobRequest{Job: job})
+	if err != nil {
+		t.Fatalf("SubmitJob: %v", err)
+	}
+
+	// Get the job
+	resp, err := srv.GetJob(context.Background(), &pb.GetJobRequest{JobID: submitResp.JobID})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if resp.Job == nil {
+		t.Fatal("expected non-nil job")
+	}
+	if resp.Job.Name != "test-get" {
+		t.Errorf("expected Name test-get, got %s", resp.Job.Name)
+	}
+}
+
+func TestGetJob_NotFound(t *testing.T) {
+	srv := newTestServer(t)
+	_, err := srv.GetJob(context.Background(), &pb.GetJobRequest{JobID: "nonexistent"})
+	if err == nil {
+		t.Fatal("expected error for nonexistent job")
+	}
+}
+
+func TestListJobs(t *testing.T) {
+	srv := newTestServer(t)
+	// Submit two jobs
+	for _, name := range []string{"job-a", "job-b"} {
+		job := &pb.Job{
+			Name:    name,
+			Type:    pb.JobTypeSingle,
+			OwnerID: "node-1",
+		}
+		if _, err := srv.SubmitJob(context.Background(), &pb.SubmitJobRequest{Job: job}); err != nil {
+			t.Fatalf("SubmitJob %s: %v", name, err)
+		}
+	}
+
+	resp, err := srv.ListJobs(context.Background(), &pb.ListJobsRequest{})
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if resp.TotalCount != 2 {
+		t.Errorf("expected 2 jobs, got %d", resp.TotalCount)
+	}
+	if len(resp.Jobs) != 2 {
+		t.Errorf("expected 2 jobs in list, got %d", len(resp.Jobs))
+	}
+}
+
+func TestCancelJob(t *testing.T) {
+	srv := newTestServer(t)
+	job := &pb.Job{
+		Name:    "test-cancel",
+		Type:    pb.JobTypeSingle,
+		OwnerID: "node-1",
+		Stages: []*pb.Stage{
+			{
+				Name: "main",
+				Split: &pb.SplitStrategy{
+					Type: pb.SplitTypeByN,
+					ByN:  &pb.ByNSplit{NumParts: 3},
+				},
+			},
+		},
+	}
+	submitResp, err := srv.SubmitJob(context.Background(), &pb.SubmitJobRequest{Job: job})
+	if err != nil {
+		t.Fatalf("SubmitJob: %v", err)
+	}
+
+	// Cancel
+	cancelResp, err := srv.CancelJob(context.Background(), &pb.CancelJobRequest{
+		JobID:  submitResp.JobID,
+		NodeID: "node-1",
+	})
+	if err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+	if !cancelResp.Success {
+		t.Fatal("expected success")
+	}
+
+	// Verify job status
+	got, err := srv.GetJob(context.Background(), &pb.GetJobRequest{JobID: submitResp.JobID})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Job.Status != pb.JobStatusCancelled {
+		t.Errorf("expected Cancelled, got %v", got.Job.Status)
+	}
+
+	// Verify units cancelled
+	units, _ := srv.store.ListUnitsByJob(submitResp.JobID)
+	for _, u := range units {
+		if u.Status != pb.UnitStatusCancelled {
+			t.Errorf("unit %s: expected Cancelled, got %v", u.ID, u.Status)
+		}
+	}
+}
+
+func TestCancelJob_NotFound(t *testing.T) {
+	srv := newTestServer(t)
+	_, err := srv.CancelJob(context.Background(), &pb.CancelJobRequest{
+		JobID:  "nonexistent",
+		NodeID: "node-1",
+	})
+	if err == nil {
+		t.Fatal("expected error for nonexistent job")
+	}
+}
+
+func TestSubmitJob_InvalidSplit(t *testing.T) {
+	srv := newTestServer(t)
+	job := &pb.Job{
+		Name:    "bad-split",
+		Type:    pb.JobTypeAggregate,
+		OwnerID: "node-1",
+		Stages: []*pb.Stage{
+			{
+				Name: "bad",
+				Split: &pb.SplitStrategy{
+					Type:   pb.SplitTypeByFile,
+					ByFile: &pb.ByFileSplit{}, // empty file list
+				},
+			},
+		},
+	}
+	_, err := srv.SubmitJob(context.Background(), &pb.SubmitJobRequest{Job: job})
+	if err == nil {
+		t.Fatal("expected error for invalid split config")
+	}
+}

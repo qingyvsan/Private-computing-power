@@ -26,8 +26,11 @@ type HeartbeatRequest struct {
 }
 
 type HeartbeatResponse struct {
-	ServerTime int64      `json:"server_time,omitempty" yaml:"server_time,omitempty"`
-	Commands   []*Command `json:"commands,omitempty" yaml:"commands,omitempty"`
+	ServerTime        int64           `json:"server_time,omitempty" yaml:"server_time,omitempty"`
+	NodeStatus        NodeStatus      `json:"node_status,omitempty" yaml:"node_status,omitempty"`
+	PhiValue          float64         `json:"phi_value,omitempty" yaml:"phi_value,omitempty"`
+	HeartbeatInterval string          `json:"heartbeat_interval,omitempty" yaml:"heartbeat_interval,omitempty"`
+	Commands          []*Command      `json:"commands,omitempty" yaml:"commands,omitempty"`
 }
 
 type UnregisterNodeRequest struct {
@@ -88,6 +91,7 @@ type WatchJobRequest struct {
 // ========== 任务分配 ==========
 
 type AssignUnitRequest struct {
+	NodeID    string            `json:"node_id,omitempty" yaml:"node_id,omitempty"`
 	Unit      *Unit         `json:"unit,omitempty" yaml:"unit,omitempty"`
 	Image     string        `json:"image,omitempty" yaml:"image,omitempty"`
 	Resources *ResourceSpec `json:"resources,omitempty" yaml:"resources,omitempty"`
@@ -99,6 +103,7 @@ type AssignUnitRequest struct {
 type AssignUnitResponse struct {
 	Accepted bool   `json:"accepted,omitempty" yaml:"accepted,omitempty"`
 	Message  string `json:"message,omitempty" yaml:"message,omitempty"`
+	UnitID   string `json:"unit_id,omitempty" yaml:"unit_id,omitempty"`
 }
 
 type UnitStatusReport struct {

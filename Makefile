@@ -16,7 +16,7 @@ BIN_DIR := bin
 
 .PHONY: proto build build-all test test-coverage lint clean \
 	dev-scheduler dev-agent \
-	build-scheduler build-agent build-cli \
+	build-scheduler build-agent build-cli build-ui build-cpstart dev-cpstart \
 	run-scheduler run-agent
 
 # ========== Protobuf 生成 ==========
@@ -36,6 +36,15 @@ build-agent:
 
 build-cli:
 	cd cli && $(GO) build $(LDFLAGS) -o ../$(BIN_DIR)/cpcli ./cmd/cpcli
+
+build-ui:
+	cd agent/ui && npm install && npm run build
+
+build-cpstart: build-ui
+	cd agent && $(GO) build $(LDFLAGS) -o ../$(BIN_DIR)/cpstart ./cmd/cpstart
+
+dev-cpstart:
+	cd agent && $(GO) run ./cmd/cpstart --config ./configs/cpstart.yaml
 
 # ========== 全平台交叉编译 ==========
 build-all:

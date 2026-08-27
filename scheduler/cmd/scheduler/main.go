@@ -9,12 +9,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
 	pb "computing-power/proto/v1"
 
+	"computing-power/pkg/trustgraph"
 	"computing-power/pkg/version"
 	"computing-power/scheduler/internal/config"
 	"computing-power/scheduler/internal/registry"
@@ -92,8 +94,23 @@ func run(configPath string) error {
 		}),
 	)
 
+	// 解析心跳间隔和超时
+	heartbeatInterval := parseDuration(cfg.FailureDetection.HeartbeatInterval, 3*time.Second)
+	heartbeatTimeout := parseDuration(cfg.FailureDetection.HeartbeatTimeout, 30*time.Second)
+
+	// 创建信任图（P7 前为内存空图）
+	trust := trustgraph.NewGraph()
+
+	// 从已有信任边恢复
+	edges, err := st.ListTrustEdges()
+	if err == nil {
+		for _, e := range edges {
+			trust.AddEdge(e.FromNode, e.ToNode, e.Signature, nil)
+		}
+	}
+
 	// 启动调度器服务
-	srv := server.New(st, reg)
+	srv := server.New(st, reg, trust, heartbeatInterval, heartbeatTimeout, cfg)
 	srv.Register(grpcServer)
 
 	// 监听信号
@@ -111,4 +128,13 @@ func handleSignals(cancel context.CancelFunc) {
 	<-ch
 	log.Printf("received shutdown signal, stopping...")
 	cancel()
+}
+
+// parseDuration 解析时长字符串，失败时返回默认值
+func parseDuration(s string, fallback time.Duration) time.Duration {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return fallback
+	}
+	return d
 }

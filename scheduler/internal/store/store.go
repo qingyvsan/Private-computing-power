@@ -283,6 +283,135 @@ func (s *Store) ListUnitsByJob(jobID string) ([]*pb.Unit, error) {
 	return units, err
 }
 
+// ListUnitsByStage 按阶段列出 Unit
+func (s *Store) ListUnitsByStage(stageID string) ([]*pb.Unit, error) {
+	var units []*pb.Unit
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketUnits).ForEach(func(k, v []byte) error {
+			var u pb.Unit
+			if err := json.Unmarshal(v, &u); err != nil {
+				return err
+			}
+			if u.StageID == stageID {
+				units = append(units, &u)
+			}
+			return nil
+		})
+	})
+	return units, err
+}
+
+// UpdateUnitStatus 原子更新 Unit 状态，返回更新后的 Unit
+func (s *Store) UpdateUnitStatus(unitID string, status pb.UnitStatus, exitCode int32, errMsg string) (*pb.Unit, error) {
+	var u *pb.Unit
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketUnits)
+		data := b.Get([]byte(unitID))
+		if data == nil {
+			return fmt.Errorf("unit %s not found", unitID)
+		}
+		var unit pb.Unit
+		if err := json.Unmarshal(data, &unit); err != nil {
+			return err
+		}
+		unit.Status = status
+		unit.ExitCode = exitCode
+		unit.ErrorMessage = errMsg
+		if status == pb.UnitStatusRunning && unit.StartedAt == 0 {
+			unit.StartedAt = time.Now().UnixMilli()
+		}
+		if status == pb.UnitStatusCompleted || status == pb.UnitStatusFailed || status == pb.UnitStatusCancelled {
+			unit.CompletedAt = time.Now().UnixMilli()
+		}
+		newData, err := json.Marshal(&unit)
+		if err != nil {
+			return err
+		}
+		if err := b.Put([]byte(unitID), newData); err != nil {
+			return err
+		}
+		u = &unit
+		return nil
+	})
+	return u, err
+}
+
+// UpdateStageStatus 更新阶段状态（从 Job 中查找并更新 Stage）
+func (s *Store) UpdateStageStatus(stageID string, status pb.StageStatus) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		// 需要遍历 jobs 找到包含该 stage 的 job
+		return tx.Bucket(bucketJobs).ForEach(func(k, v []byte) error {
+			var j pb.Job
+			if err := json.Unmarshal(v, &j); err != nil {
+				return err
+			}
+			for _, stage := range j.Stages {
+				if stage.ID == stageID {
+					stage.Status = status
+					j.UpdatedAt = time.Now().UnixMilli()
+					newData, err := json.Marshal(&j)
+					if err != nil {
+						return err
+					}
+					return tx.Bucket(bucketJobs).Put(k, newData)
+				}
+			}
+			return nil
+		})
+	})
+}
+
+// DeleteJob 级联删除作业及其所有 Unit
+func (s *Store) DeleteJob(jobID string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		// 删除关联的 Unit
+		unitB := tx.Bucket(bucketUnits)
+		if err := unitB.ForEach(func(k, v []byte) error {
+			var u pb.Unit
+			if err := json.Unmarshal(v, &u); err != nil {
+				return err
+			}
+			if u.JobID == jobID {
+				return unitB.Delete(k)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		// 删除作业本身
+		jobB := tx.Bucket(bucketJobs)
+		if err := jobB.Delete([]byte(jobID)); err != nil {
+			return err
+		}
+		// 清理索引
+		idx := tx.Bucket(bucketIndexJob)
+		return idx.ForEach(func(k, v []byte) error {
+			if string(v) == jobID {
+				return idx.Delete(k)
+			}
+			return nil
+		})
+	})
+}
+
+// ListJobsByStatus 按状态列出作业
+func (s *Store) ListJobsByStatus(status pb.JobStatus) ([]*pb.Job, error) {
+	var jobs []*pb.Job
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketJobs).ForEach(func(k, v []byte) error {
+			var j pb.Job
+			if err := json.Unmarshal(v, &j); err != nil {
+				return err
+			}
+			if j.Status == status {
+				jobs = append(jobs, &j)
+			}
+			return nil
+		})
+	})
+	return jobs, err
+}
+
 // ========== 信任图存储 ==========
 
 // SaveTrustEdge 保存信任边

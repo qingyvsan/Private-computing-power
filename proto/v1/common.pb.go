@@ -296,22 +296,24 @@ type TrustEdge struct {
 // ========== 节点信息 ==========
 
 type Node struct {
-	ID             string         `json:"id,omitempty" yaml:"id,omitempty"`
-	Name           string         `json:"name,omitempty" yaml:"name,omitempty"`
-	OverlayIP      string         `json:"overlay_ip,omitempty" yaml:"overlay_ip,omitempty"`
-	PublicKey      []byte         `json:"public_key,omitempty" yaml:"public_key,omitempty"`
-	Status         NodeStatus     `json:"status,omitempty" yaml:"status,omitempty"`
-	Resources      *NodeResources `json:"resources,omitempty" yaml:"resources,omitempty"`
-	Version        string         `json:"version,omitempty" yaml:"version,omitempty"`
-	NATType        string         `json:"nat_type,omitempty" yaml:"nat_type,omitempty"`
-	TrustList      []string       `json:"trust_list,omitempty" yaml:"trust_list,omitempty"`
-	BlockList      []string       `json:"block_list,omitempty" yaml:"block_list,omitempty"`
-	Discoverable   string         `json:"discoverable,omitempty" yaml:"discoverable,omitempty"`
-	RegisteredAt   int64          `json:"registered_at,omitempty" yaml:"registered_at,omitempty"`
-	LastHeartbeat  int64          `json:"last_heartbeat,omitempty" yaml:"last_heartbeat,omitempty"`
-	CurrentTasks   int32          `json:"current_tasks,omitempty" yaml:"current_tasks,omitempty"`
-	MaxTasks       int32          `json:"max_tasks,omitempty" yaml:"max_tasks,omitempty"`
-	Reputation     float64        `json:"reputation,omitempty" yaml:"reputation,omitempty"`
+	ID                  string         `json:"id,omitempty" yaml:"id,omitempty"`
+	Name                string         `json:"name,omitempty" yaml:"name,omitempty"`
+	OverlayIP           string         `json:"overlay_ip,omitempty" yaml:"overlay_ip,omitempty"`
+	PublicKey           []byte         `json:"public_key,omitempty" yaml:"public_key,omitempty"`
+	Status              NodeStatus     `json:"status,omitempty" yaml:"status,omitempty"`
+	Resources           *NodeResources `json:"resources,omitempty" yaml:"resources,omitempty"`
+	Version             string         `json:"version,omitempty" yaml:"version,omitempty"`
+	NATType             string         `json:"nat_type,omitempty" yaml:"nat_type,omitempty"`
+	TrustList           []string       `json:"trust_list,omitempty" yaml:"trust_list,omitempty"`
+	BlockList           []string       `json:"block_list,omitempty" yaml:"block_list,omitempty"`
+	Discoverable        string         `json:"discoverable,omitempty" yaml:"discoverable,omitempty"`
+	RegisteredAt        int64          `json:"registered_at,omitempty" yaml:"registered_at,omitempty"`
+	LastHeartbeat       int64          `json:"last_heartbeat,omitempty" yaml:"last_heartbeat,omitempty"`
+	CurrentTasks        int32          `json:"current_tasks,omitempty" yaml:"current_tasks,omitempty"`
+	MaxTasks            int32          `json:"max_tasks,omitempty" yaml:"max_tasks,omitempty"`
+	Reputation          float64        `json:"reputation,omitempty" yaml:"reputation,omitempty"`
+	PhiValue            float64        `json:"phi_value,omitempty" yaml:"phi_value,omitempty"`
+	HeartbeatSampleCount int32         `json:"heartbeat_sample_count,omitempty" yaml:"heartbeat_sample_count,omitempty"`
 }
 
 // ========== 调度命令 ==========

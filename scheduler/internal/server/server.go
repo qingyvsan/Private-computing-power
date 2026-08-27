@@ -14,7 +14,12 @@ import (
 
 	pb "computing-power/proto/v1"
 
+	"computing-power/pkg/trustgraph"
+	"computing-power/scheduler/internal/config"
+	"computing-power/scheduler/internal/events"
 	"computing-power/scheduler/internal/registry"
+
+	"computing-power/scheduler/internal/scheduler"
 	"computing-power/scheduler/internal/store"
 )
 
@@ -22,13 +27,39 @@ import (
 type Server struct {
 	store    *store.Store
 	registry *registry.Registry
+	eventBus *events.Bus
+	engine   *scheduler.Engine
+	stopCh   chan struct{}
+
+	heartbeatInterval time.Duration
 }
 
 // New 创建调度器服务器
-func New(st *store.Store, reg *registry.Registry) *Server {
+func New(st *store.Store, reg *registry.Registry, trust *trustgraph.Graph,
+	heartbeatInterval, heartbeatTimeout time.Duration, cfg *config.Config) *Server {
+	reg.SetHeartbeatTimeout(heartbeatTimeout)
+
+	// 创建调度引擎
+	reassignDelay, _ := time.ParseDuration(cfg.SchedulerEngine.ReassignDelay)
+	eng := scheduler.New(st, reg, trust,
+		cfg.SchedulerEngine.MaxRetries,
+		reassignDelay,
+		cfg.SchedulerEngine.ConcurrentAssignments,
+		scheduler.ScoringWeights{
+			ResourceMatch:  cfg.SchedulerEngine.ScoringWeights.ResourceMatch,
+			NetworkQuality: cfg.SchedulerEngine.ScoringWeights.NetworkQuality,
+			Reputation:     cfg.SchedulerEngine.ScoringWeights.Reputation,
+			Load:           cfg.SchedulerEngine.ScoringWeights.Load,
+		},
+	)
+
 	return &Server{
-		store:    st,
-		registry: reg,
+		store:             st,
+		registry:          reg,
+		eventBus:          events.NewBus(),
+		engine:            eng,
+		stopCh:            make(chan struct{}),
+		heartbeatInterval: heartbeatInterval,
 	}
 }
 
@@ -45,8 +76,19 @@ func (s *Server) Start(ctx context.Context, listen string, grpcServer *grpc.Serv
 	}
 	log.Printf("gRPC server listening on %s", listen)
 
+	// 启动定期故障检测循环（2 倍心跳间隔）
+	checkInterval := s.heartbeatInterval * 2
+	if checkInterval < time.Second {
+		checkInterval = 5 * time.Second
+	}
+	s.registry.Start(ctx.Done(), checkInterval)
+
+	// 启动调度引擎
+	s.engine.Start(ctx)
+
 	go func() {
 		<-ctx.Done()
+		close(s.stopCh)
 		grpcServer.GracefulStop()
 	}()
 
@@ -106,9 +148,22 @@ func (s *Server) Heartbeat(stream pb.Scheduler_HeartbeatServer) error {
 
 		s.registry.ReportHeartbeat(req.NodeID, req.Resources, req.RunningUnits)
 
+		// 获取节点当前状态和 φ 值
+		now := time.Now()
+		node := s.registry.GetNode(req.NodeID)
+		phi := 0.0
+		status := pb.NodeStatusOnline
+		if node != nil {
+			phi = node.PhiValue
+			status = node.Status
+		}
+
 		resp := &pb.HeartbeatResponse{
-			ServerTime: time.Now().UnixMilli(),
-			Commands:   []*pb.Command{},
+			ServerTime:        now.UnixMilli(),
+			NodeStatus:        status,
+			PhiValue:          phi,
+			HeartbeatInterval: s.heartbeatInterval.String(),
+			Commands:           s.engine.PopCommands(req.NodeID),
 		}
 		if err := stream.Send(resp); err != nil {
 			return err
@@ -123,7 +178,7 @@ func (s *Server) SubmitJob(ctx context.Context, req *pb.SubmitJobRequest) (*pb.S
 	job := req.Job
 	now := time.Now().UnixMilli()
 	if job.ID == "" {
-		job.ID = fmt.Sprintf("job-%d", now)
+		job.ID = fmt.Sprintf("job-%d-%d", now, time.Now().UnixNano()%100000)
 	}
 	if job.CreatedAt == 0 {
 		job.CreatedAt = now
@@ -131,10 +186,10 @@ func (s *Server) SubmitJob(ctx context.Context, req *pb.SubmitJobRequest) (*pb.S
 	job.UpdatedAt = now
 	job.Status = pb.JobStatusPending
 
-	// 为 Job 的每个 Stage 生成 ID 并创建 Unit
-	for _, stage := range job.Stages {
+	// 为 Job 的每个 Stage 生成 ID
+	for i, stage := range job.Stages {
 		if stage.ID == "" {
-			stage.ID = fmt.Sprintf("stage-%s-%d", job.ID, now)
+			stage.ID = fmt.Sprintf("stage-%s-%d-%d", job.ID, now, i)
 		}
 		stage.JobID = job.ID
 		if stage.MaxConcurrency == 0 {
@@ -142,15 +197,43 @@ func (s *Server) SubmitJob(ctx context.Context, req *pb.SubmitJobRequest) (*pb.S
 		}
 	}
 
+	// 执行拆分策略，创建 Unit
+	var totalUnits int32
+	for _, stage := range job.Stages {
+		units, err := executeSplit(stage)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "split stage %s: %v", stage.ID, err)
+		}
+		for _, unit := range units {
+			if err := s.store.SaveUnit(unit); err != nil {
+				return nil, status.Errorf(codes.Internal, "save unit: %v", err)
+			}
+		}
+		stage.Units = units
+		totalUnits += int32(len(units))
+	}
+
 	if err := s.store.SaveJob(job); err != nil {
 		return nil, status.Errorf(codes.Internal, "save job: %v", err)
 	}
 
-	log.Printf("job submitted: %s type=%s owner=%s", job.ID, job.Type, job.OwnerID)
+	// 发布事件
+	s.eventBus.Publish(&pb.JobEvent{
+		JobID:     job.ID,
+		Status:    job.Status,
+		Message:   fmt.Sprintf("job submitted with %d units across %d stages", totalUnits, len(job.Stages)),
+		Timestamp: time.Now().UnixMilli(),
+	})
+
+	// 触发调度引擎
+	s.engine.ScheduleNow()
+
+	log.Printf("job submitted: %s type=%s owner=%s stages=%d units=%d",
+		job.ID, job.Type, job.OwnerID, len(job.Stages), totalUnits)
 	return &pb.SubmitJobResponse{
 		JobID:   job.ID,
 		Status:  job.Status,
-		Message: "job accepted",
+		Message: fmt.Sprintf("job accepted with %d units across %d stages", totalUnits, len(job.Stages)),
 	}, nil
 }
 
@@ -178,18 +261,60 @@ func (s *Server) ListJobs(ctx context.Context, req *pb.ListJobsRequest) (*pb.Lis
 	}, nil
 }
 
-// CancelJob 取消作业
+// CancelJob 取消作业（级联取消所有 Unit 和 Stage）
 func (s *Server) CancelJob(ctx context.Context, req *pb.CancelJobRequest) (*pb.CancelJobResponse, error) {
+	// 加载作业
+	job, err := s.store.GetJob(req.JobID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get job: %v", err)
+	}
+	if job == nil {
+		return nil, status.Errorf(codes.NotFound, "job %s not found", req.JobID)
+	}
+
+	// 级联取消所有 Pending/Running 的 Unit
+	units, err := s.store.ListUnitsByJob(req.JobID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list units: %v", err)
+	}
+	for _, u := range units {
+		if u.Status == pb.UnitStatusPending || u.Status == pb.UnitStatusAssigned || u.Status == pb.UnitStatusRunning {
+			if _, err := s.store.UpdateUnitStatus(u.ID, pb.UnitStatusCancelled, 0, "job cancelled"); err != nil {
+				log.Printf("cancel unit %s: %v", u.ID, err)
+			}
+		}
+	}
+
+	// 更新所有 Stage 状态为 CANCELLED
+	for _, stage := range job.Stages {
+		if stage.Status != pb.StageStatusCompleted && stage.Status != pb.StageStatusFailed {
+			stage.Status = pb.StageStatusSkipped
+		}
+	}
+
+	// 更新作业状态
 	if err := s.store.UpdateJobStatus(req.JobID, pb.JobStatusCancelled); err != nil {
 		return nil, status.Errorf(codes.Internal, "cancel job: %v", err)
 	}
-	log.Printf("job cancelled: %s by %s", req.JobID, req.NodeID)
+
+	// 发布事件
+	s.eventBus.Publish(&pb.JobEvent{
+		JobID:     req.JobID,
+		Status:    pb.JobStatusCancelled,
+		Message:   "job cancelled by " + req.NodeID,
+		Timestamp: time.Now().UnixMilli(),
+	})
+
+	// 触发调度引擎
+	s.engine.ScheduleNow()
+
+	log.Printf("job cancelled: %s by %s (%d units affected)", req.JobID, req.NodeID, len(units))
 	return &pb.CancelJobResponse{Success: true}, nil
 }
 
-// WatchJob 订阅作业状态变更
+// WatchJob 订阅作业状态变更（流式推送）
 func (s *Server) WatchJob(req *pb.WatchJobRequest, stream pb.Scheduler_WatchJobServer) error {
-	// P2 阶段实现：通过事件总线推送 JobEvent
+	// 先发送当前状态快照
 	job, err := s.store.GetJob(req.JobID)
 	if err != nil {
 		return status.Errorf(codes.Internal, "get job: %v", err)
@@ -197,31 +322,68 @@ func (s *Server) WatchJob(req *pb.WatchJobRequest, stream pb.Scheduler_WatchJobS
 	if job == nil {
 		return status.Errorf(codes.NotFound, "job %s not found", req.JobID)
 	}
-	// 发送当前状态快照
+
+	// 发送当前快照
 	ev := &pb.JobEvent{
 		JobID:     job.ID,
 		Status:    job.Status,
+		Message:   "current snapshot",
 		Timestamp: time.Now().UnixMilli(),
 	}
 	if err := stream.Send(ev); err != nil {
 		return err
 	}
-	return nil
+
+	// 订阅后续事件
+	subscriberID := fmt.Sprintf("watch-%d", time.Now().UnixNano())
+	ch := s.eventBus.Subscribe(req.JobID, subscriberID)
+	defer s.eventBus.Unsubscribe(req.JobID, subscriberID)
+
+	for {
+		select {
+		case <-stream.Context().Done():
+			return nil
+		case event, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			if err := stream.Send(event); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 // ========== 任务分配 ==========
 
-// AssignUnit 分配任务到节点
+// AssignUnit 分配任务到节点（pull 模式）
 func (s *Server) AssignUnit(ctx context.Context, req *pb.AssignUnitRequest) (*pb.AssignUnitResponse, error) {
-	// P3 阶段实现完整的调度逻辑
-	// 当前返回拒绝，等待调度引擎实现
+	if req.NodeID == "" {
+		return &pb.AssignUnitResponse{
+			Accepted: false,
+			Message:  "node_id is required",
+		}, nil
+	}
+
+	unit, err := s.engine.AssignToNode(req.NodeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "assign unit: %v", err)
+	}
+	if unit == nil {
+		return &pb.AssignUnitResponse{
+			Accepted: false,
+			Message:  "no suitable unit for node",
+		}, nil
+	}
+
 	return &pb.AssignUnitResponse{
-		Accepted: false,
-		Message:  "scheduling engine not implemented yet",
+		Accepted: true,
+		Message:  "unit assigned",
+		UnitID:   unit.ID,
 	}, nil
 }
 
-// ReportUnitStatus 接收 Unit 状态上报
+// ReportUnitStatus 接收 Unit 状态上报并传播状态变更
 func (s *Server) ReportUnitStatus(stream pb.Scheduler_ReportUnitStatusServer) error {
 	for {
 		report, err := stream.Recv()
@@ -232,21 +394,125 @@ func (s *Server) ReportUnitStatus(stream pb.Scheduler_ReportUnitStatusServer) er
 		if report.UnitID != "" {
 			unit, err := s.store.GetUnit(report.UnitID)
 			if err == nil && unit != nil {
+				oldStatus := unit.Status
 				unit.Status = report.Status
 				unit.ExitCode = report.ExitCode
 				unit.ErrorMessage = report.ErrorMessage
 				if report.Output != nil {
 					unit.Output = report.Output
 				}
-				if report.Status == pb.UnitStatusCompleted {
+				if report.Status == pb.UnitStatusRunning && unit.StartedAt == 0 {
+					unit.StartedAt = time.Now().UnixMilli()
+				}
+				if report.Status == pb.UnitStatusCompleted || report.Status == pb.UnitStatusFailed || report.Status == pb.UnitStatusCancelled {
 					unit.CompletedAt = time.Now().UnixMilli()
 				}
 				s.store.SaveUnit(unit)
+
+				// 状态变更时检查 Stage / Job 是否完成
+				if oldStatus != report.Status {
+					// 失败时触发重试调度
+						if report.Status == pb.UnitStatusFailed && int(unit.RetryCount) < s.engine.MaxRetries() {
+							unit.RetryCount++
+							unit.Status = pb.UnitStatusPending
+							unit.AssignedNode = ""
+							unit.ErrorMessage = ""
+							s.store.SaveUnit(unit)
+							s.engine.ScheduleNow()
+						} else {
+							s.propagateUnitStatus(unit)
+						}
+				}
 			}
 		}
 		if err := stream.Send(&pb.UnitStatusAck{Received: true}); err != nil {
 			return err
 		}
+	}
+}
+
+// propagateUnitStatus 检查 Unit 所属 Stage 和 Job 的状态
+func (s *Server) propagateUnitStatus(unit *pb.Unit) {
+	// 查找 Unit 所属的 Job
+	job, err := s.store.GetJob(unit.JobID)
+	if err != nil || job == nil {
+		return
+	}
+
+	// 找到对应的 Stage
+	for _, stage := range job.Stages {
+		if stage.ID != unit.StageID {
+			continue
+		}
+
+		// 获取该 Stage 的所有 Unit
+		stageUnits, err := s.store.ListUnitsByStage(stage.ID)
+		if err != nil {
+			return
+		}
+
+		// 检查是否所有 Unit 都处于终结状态
+		allTerminal := true
+		hasFailed := false
+		hasRunning := false
+		for _, u := range stageUnits {
+			switch u.Status {
+			case pb.UnitStatusFailed, pb.UnitStatusCancelled, pb.UnitStatusTimeout:
+				hasFailed = true
+			case pb.UnitStatusRunning, pb.UnitStatusAssigned, pb.UnitStatusPending:
+				allTerminal = false
+				if u.Status == pb.UnitStatusRunning {
+					hasRunning = true
+				}
+			case pb.UnitStatusCompleted:
+				// completed is terminal
+			}
+		}
+
+		// 更新 Stage 状态
+		var newStageStatus pb.StageStatus
+		switch {
+		case hasRunning:
+			newStageStatus = pb.StageStatusRunning
+		case allTerminal && hasFailed:
+			newStageStatus = pb.StageStatusFailed
+		case allTerminal && !hasFailed:
+			newStageStatus = pb.StageStatusCompleted
+		default:
+			newStageStatus = pb.StageStatusRunning
+		}
+		if newStageStatus != stage.Status {
+			stage.Status = newStageStatus
+			s.store.UpdateStageStatus(stage.ID, newStageStatus)
+		}
+		break
+	}
+
+	// 检查所有 Stage 是否都终结 → 更新 Job 状态
+	allStagesTerminal := true
+	anyStageFailed := false
+	for _, stage := range job.Stages {
+		if stage.Status != pb.StageStatusCompleted && stage.Status != pb.StageStatusFailed && stage.Status != pb.StageStatusSkipped {
+			allStagesTerminal = false
+		}
+		if stage.Status == pb.StageStatusFailed {
+			anyStageFailed = true
+		}
+	}
+	if allStagesTerminal {
+		newStatus := pb.JobStatusCompleted
+		if anyStageFailed {
+			newStatus = pb.JobStatusFailed
+		}
+		s.store.UpdateJobStatus(job.ID, newStatus)
+		s.eventBus.Publish(&pb.JobEvent{
+			JobID:     job.ID,
+			Status:    newStatus,
+			Message:   fmt.Sprintf("job completed with status %s", newStatus),
+			Timestamp: time.Now().UnixMilli(),
+		})
+		// 触发调度引擎
+		s.engine.ScheduleNow()
 	}
 }
 

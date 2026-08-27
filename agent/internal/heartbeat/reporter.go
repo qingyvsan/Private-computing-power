@@ -21,6 +21,10 @@ type Reporter struct {
 	interval     time.Duration
 	jitter       time.Duration
 	runningUnits func() []string
+
+	// 运行时状态
+	lastStatus   pb.NodeStatus
+	lastPhiValue float64
 }
 
 // NewReporter 创建心跳上报器
@@ -38,6 +42,7 @@ func NewReporter(
 		interval:     interval,
 		jitter:       jitter,
 		runningUnits: runningUnits,
+		lastStatus:   pb.NodeStatusOnline,
 	}
 }
 
@@ -87,10 +92,7 @@ func (r *Reporter) Start(ctx context.Context) error {
 				return result.err
 			}
 			if result.resp != nil {
-				// TODO(P3): 处理调度器下发的命令
-				for _, cmd := range result.resp.Commands {
-					log.Printf("received command: %s", cmd.Type)
-				}
+				r.processResponse(result.resp)
 			}
 		case <-time.After(500 * time.Millisecond):
 			// 调度器暂时没有响应，继续
@@ -107,6 +109,35 @@ func (r *Reporter) Start(ctx context.Context) error {
 		case <-time.After(delay):
 		}
 	}
+}
+
+// processResponse 处理调度器心跳响应
+func (r *Reporter) processResponse(resp *pb.HeartbeatResponse) {
+	// 记录状态变化
+	if resp.NodeStatus != pb.NodeStatusUnspecified && resp.NodeStatus != r.lastStatus {
+		log.Printf("node status changed by server: %s -> %s (phi=%.2f)",
+			r.lastStatus, resp.NodeStatus, resp.PhiValue)
+		r.lastStatus = resp.NodeStatus
+	}
+
+	// 记录 φ 值（仅变化超过 0.5 时打印，避免日志淹没）
+	if resp.PhiValue > 0 && (resp.PhiValue-r.lastPhiValue > 0.5 || r.lastPhiValue-resp.PhiValue > 0.5) {
+		log.Printf("heartbeat phi=%.2f status=%s samples=%s",
+			resp.PhiValue, resp.NodeStatus, "N/A")
+		r.lastPhiValue = resp.PhiValue
+	}
+
+	// 处理调度器下发的命令
+	for _, cmd := range resp.Commands {
+		log.Printf("received command: %s", cmd.Type)
+	}
+
+	// TODO(P3): 根据服务器建议调整心跳间隔
+	// if resp.HeartbeatInterval != "" {
+	// 	if newInterval, err := time.ParseDuration(resp.HeartbeatInterval); err == nil {
+	// 		r.interval = newInterval
+	// 	}
+	// }
 }
 
 // StartWithRetry 带重连的心跳上报
