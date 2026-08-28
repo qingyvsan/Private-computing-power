@@ -29,7 +29,7 @@ var (
 )
 
 func init() {
-	RootCmd.PersistentFlags().StringVarP(&schedulerAddr, "scheduler", "s", "localhost:9090", "调度器 gRPC 地址")
+	RootCmd.PersistentFlags().StringVarP(&schedulerAddr, "scheduler", "s", "8.138.108.183:9090", "调度器 gRPC 地址")
 	RootCmd.PersistentFlags().StringVarP(&outputFormat, "format", "f", "table", "输出格式: table | json")
 
 	// 注册子命令

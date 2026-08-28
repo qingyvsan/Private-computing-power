@@ -8,6 +8,7 @@ import (
 
 	pb "computing-power/proto/v1"
 
+	"computing-power/agent/internal/container"
 	"computing-power/agent/internal/cpstart/agent"
 	cpstartcfg "computing-power/agent/internal/cpstart/config"
 )
@@ -161,6 +162,12 @@ func (h *Handler) setupCheck(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		_, err = client.ListNodes(r.Context(), &pb.ListNodesRequest{})
 		checks["scheduler"] = err == nil
+	}
+
+	// 检查 GPU 可用性
+	if h.cfg.Resources.ReportGPU {
+		gpus, err := container.DiscoverGPUs()
+		checks["gpu"] = err == nil && len(gpus) > 0
 	}
 
 	writeOK(w, checks)

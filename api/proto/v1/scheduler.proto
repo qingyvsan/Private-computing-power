@@ -57,7 +57,9 @@ message RegisterNodeResponse {
   string node_id = 1;
   string overlay_ip = 2;
   bytes nebula_certificate = 3;
+  bytes nebula_private_key = 5;
   string nebula_config = 4;
+  bytes ca_certificate = 6;
 }
 
 message HeartbeatRequest {

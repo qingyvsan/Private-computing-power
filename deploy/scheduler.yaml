@@ -1,0 +1,51 @@
+# 中央调度器配置（服务器部署）
+scheduler:
+  id: "scheduler-1"
+  node_id: "scheduler"
+
+server:
+  grpc:
+    listen: "0.0.0.0:9090"
+    max_recv_msg_size: 16777216
+    max_send_msg_size: 16777216
+
+tls:
+  ca_cert: "/opt/cp-scheduler/configs/ca.pem"
+  ca_key: "/opt/cp-scheduler/configs/ca-key.pem"
+
+database:
+  engine: "boltdb"
+  path: "/opt/cp-scheduler/data/scheduler.db"
+  backup_interval: "24h"
+  backup_dir: "/opt/cp-scheduler/data/backups"
+
+failure_detection:
+  phi_threshold: 4.0
+  min_samples: 100
+  window_size: 1000
+  heartbeat_interval: "3s"
+  heartbeat_timeout: "30s"
+
+scheduler_engine:
+  max_retries: 3
+  reassign_delay: "5s"
+  concurrent_assignments: 100
+
+nebula:
+  ca_cert: "/opt/cp-scheduler/configs/nebula/ca.crt"
+  ca_key: "/opt/cp-scheduler/configs/nebula/ca.key"
+  lighthouse:
+    addr: "0.0.0.0:4242"
+    host: "10.0.0.1"
+  network: "10.1.0.0/16"
+  groups:
+    master: "master"
+    trusted: "trusted"
+    mutual: "mutual"
+    discoverable: "discoverable"
+    default: "default"
+
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"

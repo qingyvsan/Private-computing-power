@@ -28,7 +28,7 @@ func newTestServer(t *testing.T) *Server {
 		os.Remove(path)
 	})
 	reg := registry.NewRegistry(1000, 100, 4.0)
-	srv := New(st, reg, trustgraph.NewGraph(), 3*time.Second, 30*time.Second, config.Default())
+	srv := New(st, reg, trustgraph.NewGraph(), 3*time.Second, 30*time.Second, config.Default(), nil, nil)
 	return srv
 }
 

@@ -114,17 +114,30 @@ func (e *Engine) loadRetryEligibleUnits() ([]*pb.Unit, error) {
 
 // buildAssignCommand 构造 Agent 执行命令
 func buildAssignCommand(unit *pb.Unit, job *pb.Job) *pb.Command {
-	payload, _ := json.Marshal(map[string]interface{}{
+	payload := map[string]interface{}{
 		"unit_id":  unit.ID,
 		"stage_id": unit.StageID,
 		"job_id":   unit.JobID,
 		"image":    job.Image,
 		"input":    unit.Input,
 		"index":    unit.Index,
-	})
+	}
+
+	// 包含 GPU 请求（如果作业需要 GPU）
+	spec := getResourceSpecForUnit(unit, job)
+	if spec != nil && len(spec.GPUs) > 0 {
+		gpuReq := spec.GPUs[0]
+		payload["gpu_request"] = map[string]interface{}{
+			"memory_mb": gpuReq.MemoryMB,
+			"cores":     gpuReq.Cores,
+			"count":     gpuReq.Count,
+		}
+	}
+
+	payloadBytes, _ := json.Marshal(payload)
 	return &pb.Command{
 		Type:    "assign",
-		Payload: payload,
+		Payload: payloadBytes,
 	}
 }
 

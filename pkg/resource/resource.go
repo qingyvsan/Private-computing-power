@@ -39,16 +39,24 @@ func Fits(node *pb.NodeResources, req *pb.ResourceSpec) bool {
 	// GPU
 	if len(req.GPUs) > 0 {
 		totalGPUs := 0
+		maxReqMem := int64(0)
 		for _, reqGPU := range req.GPUs {
 			totalGPUs += int(reqGPU.Count)
+			if reqGPU.MemoryMB > maxReqMem {
+				maxReqMem = reqGPU.MemoryMB
+			}
 		}
 		availGPUs := 0
+		gpusWithMaxMem := 0
 		for _, nodeGPU := range node.GPUs {
 			if nodeGPU.MemoryAvailMB >= req.GPUs[0].MemoryMB {
 				availGPUs++
 			}
+			if nodeGPU.MemoryAvailMB >= maxReqMem {
+				gpusWithMaxMem++
+			}
 		}
-		if availGPUs < totalGPUs {
+		if availGPUs < totalGPUs || gpusWithMaxMem < 1 {
 			return false
 		}
 	}
@@ -76,8 +84,8 @@ func Score(node *pb.NodeResources, req *pb.ResourceSpec) float64 {
 	if req.CPUCores > 0 && node.CPUCores > 0 {
 		availCPU := node.CPUCores * (1 - node.CPUUsage)
 		cpuScore := availCPU / (availCPU + req.CPUCores)
-		score += cpuScore * 0.4
-		weights += 0.4
+		score += cpuScore * 0.30
+		weights += 0.30
 	}
 
 	// 内存匹配度
@@ -85,8 +93,23 @@ func Score(node *pb.NodeResources, req *pb.ResourceSpec) float64 {
 		availMem := float64(node.MemoryBytes - node.MemoryUsed)
 		reqMem := float64(req.MemoryBytes)
 		memScore := availMem / (availMem + reqMem)
-		score += memScore * 0.3
-		weights += 0.3
+		score += memScore * 0.25
+		weights += 0.25
+	}
+
+	// GPU 匹配度（剩余 GPU 内存越多越好）
+	if len(req.GPUs) > 0 && len(node.GPUs) > 0 {
+		totalAvailMem := int64(0)
+		totalTotalMem := int64(0)
+		for _, gpu := range node.GPUs {
+			totalAvailMem += gpu.MemoryAvailMB
+			totalTotalMem += gpu.MemoryTotalMB
+		}
+		if totalTotalMem > 0 {
+			gpuRatio := float64(totalAvailMem) / float64(totalTotalMem)
+			score += gpuRatio * 0.15
+			weights += 0.15
+		}
 	}
 
 	// 网络匹配度（延迟越低越好）
@@ -95,15 +118,15 @@ func Score(node *pb.NodeResources, req *pb.ResourceSpec) float64 {
 		if latencyRatio < 0 {
 			latencyRatio = 0
 		}
-		score += latencyRatio * 0.2
-		weights += 0.2
+		score += latencyRatio * 0.20
+		weights += 0.20
 	}
 
 	// 负载匹配度（当前负载越低越好）
 	cpuUtil := node.CPUUsage
 	loadScore := 1.0 - cpuUtil
-	score += loadScore * 0.1
-	weights += 0.1
+	score += loadScore * 0.10
+	weights += 0.10
 
 	if weights == 0 {
 		return 0.5

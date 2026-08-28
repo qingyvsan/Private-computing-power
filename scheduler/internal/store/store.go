@@ -20,6 +20,7 @@ var (
 	bucketMeta      = []byte("meta")
 	bucketIndexJob  = []byte("index_job_by_owner")
 	bucketIndexNode = []byte("index_node_by_status")
+	bucketIPAM      = []byte("ipam")
 )
 
 // Store 是调度器的持久化层（BoltDB 实现）
@@ -48,6 +49,7 @@ func (s *Store) init() error {
 		buckets := [][]byte{
 			bucketNodes, bucketJobs, bucketUnits, bucketTrust,
 			bucketInvites, bucketMeta, bucketIndexJob, bucketIndexNode,
+			bucketIPAM,
 		}
 		for _, b := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
@@ -447,4 +449,45 @@ func (s *Store) ListTrustEdges() ([]*pb.TrustEdge, error) {
 		})
 	})
 	return edges, err
+}
+
+// ========== IPAM 存储 ==========
+
+// SaveIPAllocation 保存 IP 分配记录
+func (s *Store) SaveIPAllocation(nodeID, ip string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketIPAM).Put([]byte(nodeID), []byte(ip))
+	})
+}
+
+// GetIPAllocation 获取节点的 IP 分配；返回空字符串表示未分配
+func (s *Store) GetIPAllocation(nodeID string) (string, error) {
+	var ip string
+	err := s.db.View(func(tx *bolt.Tx) error {
+		val := tx.Bucket(bucketIPAM).Get([]byte(nodeID))
+		if val != nil {
+			ip = string(val)
+		}
+		return nil
+	})
+	return ip, err
+}
+
+// DeleteIPAllocation 删除 IP 分配记录
+func (s *Store) DeleteIPAllocation(nodeID string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketIPAM).Delete([]byte(nodeID))
+	})
+}
+
+// ListIPAllocations 列出所有 IP 分配记录
+func (s *Store) ListIPAllocations() (map[string]string, error) {
+	allocations := make(map[string]string)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketIPAM).ForEach(func(k, v []byte) error {
+			allocations[string(k)] = string(v)
+			return nil
+		})
+	})
+	return allocations, err
 }

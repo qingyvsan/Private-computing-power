@@ -11,8 +11,8 @@ func TestDefault(t *testing.T) {
 	if c.Console.Port != 8080 {
 		t.Errorf("expected port 8080, got %d", c.Console.Port)
 	}
-	if c.Scheduler.Address != "localhost:9090" {
-		t.Errorf("expected localhost:9090, got %s", c.Scheduler.Address)
+	if c.Scheduler.Address != "8.138.108.183:9090" {
+		t.Errorf("expected 8.138.108.183:9090, got %s", c.Scheduler.Address)
 	}
 	if c.Agent.Name == "" {
 		t.Error("expected non-empty agent name")

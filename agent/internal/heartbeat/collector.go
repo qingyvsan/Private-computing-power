@@ -1,9 +1,13 @@
 package heartbeat
 
 import (
+	"log"
 	"runtime"
 
 	pb "computing-power/proto/v1"
+
+	"computing-power/agent/internal/container"
+	"computing-power/agent/internal/nebula"
 )
 
 // Collector 资源采集器
@@ -11,13 +15,15 @@ import (
 type Collector struct {
 	reportGPU     bool
 	reportNetwork bool
+	nebulaMgr     *nebula.Manager
 }
 
 // NewCollector 创建资源采集器
-func NewCollector(reportGPU, reportNetwork bool) *Collector {
+func NewCollector(reportGPU, reportNetwork bool, nebulaMgr *nebula.Manager) *Collector {
 	return &Collector{
 		reportGPU:     reportGPU,
 		reportNetwork: reportNetwork,
+		nebulaMgr:     nebulaMgr,
 	}
 }
 
@@ -35,15 +41,21 @@ func (c *Collector) Collect() *pb.NodeResources {
 	}
 
 	if c.reportGPU {
-		// TODO(P5): 通过 nvidia-smi 或 HAMi 采集 GPU 指标
-		res.GPUs = []*pb.GPUDevice{}
+		gpus, err := container.DiscoverGPUs()
+		if err != nil {
+			log.Printf("collector: GPU discovery error: %v", err)
+		}
+		res.GPUs = gpus
 	}
 
 	if c.reportNetwork {
-		// TODO(P6): 通过 Nebula 隧道和探测采集网络指标
+		natType := "unknown"
+		if c.nebulaMgr != nil {
+			natType = c.nebulaMgr.GetNATType()
+		}
 		res.Network = &pb.NetworkMetrics{
-			RTTMs: 5,
-			NATType: "unknown",
+			RTTMs:   5,
+			NATType: natType,
 		}
 	}
 

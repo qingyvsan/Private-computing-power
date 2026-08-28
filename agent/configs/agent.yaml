@@ -6,7 +6,7 @@ agent:
   temp_dir: "./tmp/agent"
 
 scheduler:
-  address: "localhost:9090"
+  address: "8.138.108.183:9090"
   reconnect_initial: "1s"
   reconnect_max: "60s"
   reconnect_multiplier: 2.0
@@ -43,6 +43,7 @@ resources:
   network_probe_interval: "30s"
 
 nebula:
+  enabled: false
   config_path: "./data/agent/nebula/config.yaml"
   binary_path: "nebula"
   data_dir: "./data/agent/nebula"

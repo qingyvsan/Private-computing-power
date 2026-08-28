@@ -59,7 +59,7 @@ func NewRunner(cfg *cpstartcfg.Config) *Runner {
 	return &Runner{
 		cfg:  cfg,
 		done: make(chan struct{}),
-		col:  heartbeat.NewCollector(cfg.Resources.ReportGPU, true),
+		col:  heartbeat.NewCollector(cfg.Resources.ReportGPU, true, nil),
 	}
 }
 

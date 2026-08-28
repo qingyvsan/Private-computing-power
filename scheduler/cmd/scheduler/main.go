@@ -18,7 +18,9 @@ import (
 
 	"computing-power/pkg/trustgraph"
 	"computing-power/pkg/version"
+	"computing-power/scheduler/internal/ca"
 	"computing-power/scheduler/internal/config"
+	"computing-power/scheduler/internal/ipam"
 	"computing-power/scheduler/internal/registry"
 	"computing-power/scheduler/internal/server"
 	"computing-power/scheduler/internal/store"
@@ -109,8 +111,27 @@ func run(configPath string) error {
 		}
 	}
 
+	// 创建 Nebula CA（自动生成或加载已有）
+	caMgr, err := ca.NewManager(
+		cfg.Nebula.CACert,
+		cfg.Nebula.CAKey,
+		"ComputingPower",
+		365*24*time.Hour, // 节点证书有效期 1 年
+	)
+	if err != nil {
+		log.Printf("nebula CA init: %v (overlay network disabled)", err)
+		caMgr = nil
+	}
+
+	// 创建 IPAM
+	ipamMgr, err := ipam.NewIPAM(st, cfg.Nebula.Network, cfg.Nebula.Lighthouse.Host)
+	if err != nil {
+		log.Printf("ipam init: %v (overlay IP disabled)", err)
+		ipamMgr = nil
+	}
+
 	// 启动调度器服务
-	srv := server.New(st, reg, trust, heartbeatInterval, heartbeatTimeout, cfg)
+	srv := server.New(st, reg, trust, heartbeatInterval, heartbeatTimeout, cfg, caMgr, ipamMgr)
 	srv.Register(grpcServer)
 
 	// 监听信号

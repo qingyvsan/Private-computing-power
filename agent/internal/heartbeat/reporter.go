@@ -21,6 +21,7 @@ type Reporter struct {
 	interval     time.Duration
 	jitter       time.Duration
 	runningUnits func() []string
+	commandHandler func(cmd *pb.Command)
 
 	// 运行时状态
 	lastStatus   pb.NodeStatus
@@ -34,15 +35,17 @@ func NewReporter(
 	client pb.SchedulerServiceClient,
 	interval, jitter time.Duration,
 	runningUnits func() []string,
+	commandHandler func(cmd *pb.Command),
 ) *Reporter {
 	return &Reporter{
-		nodeID:       nodeID,
-		collector:    collector,
-		client:       client,
-		interval:     interval,
-		jitter:       jitter,
-		runningUnits: runningUnits,
-		lastStatus:   pb.NodeStatusOnline,
+		nodeID:         nodeID,
+		collector:      collector,
+		client:         client,
+		interval:       interval,
+		jitter:         jitter,
+		runningUnits:   runningUnits,
+		commandHandler: commandHandler,
+		lastStatus:     pb.NodeStatusOnline,
 	}
 }
 
@@ -129,7 +132,9 @@ func (r *Reporter) processResponse(resp *pb.HeartbeatResponse) {
 
 	// 处理调度器下发的命令
 	for _, cmd := range resp.Commands {
-		log.Printf("received command: %s", cmd.Type)
+		if r.commandHandler != nil {
+			r.commandHandler(cmd)
+		}
 	}
 
 	// TODO(P3): 根据服务器建议调整心跳间隔

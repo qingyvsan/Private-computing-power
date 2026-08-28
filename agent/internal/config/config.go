@@ -63,6 +63,7 @@ type Config struct {
 	} `yaml:"resources"`
 
 	Nebula struct {
+		Enabled    bool   `yaml:"enabled"`
 		ConfigPath string `yaml:"config_path"`
 		BinaryPath string `yaml:"binary_path"`
 		DataDir    string `yaml:"data_dir"`
@@ -99,7 +100,7 @@ func Default() *Config {
 	c.Agent.Name = ""
 	c.Agent.DataDir = "./data/agent"
 	c.Agent.TempDir = "./tmp/agent"
-	c.Scheduler.Address = "localhost:9090"
+	c.Scheduler.Address = "8.138.108.183:9090"
 	c.Scheduler.ReconnectInitial = "1s"
 	c.Scheduler.ReconnectMax = "60s"
 	c.Scheduler.ReconnectMultiplier = 2.0
@@ -124,6 +125,7 @@ func Default() *Config {
 	c.Resources.ReportGPU = true
 	c.Resources.ReportNetwork = true
 	c.Resources.NetworkProbeInterval = "30s"
+	c.Nebula.Enabled = false
 	c.Nebula.ConfigPath = "./data/agent/nebula/config.yaml"
 	c.Nebula.BinaryPath = "nebula"
 	c.Nebula.DataDir = "./data/agent/nebula"

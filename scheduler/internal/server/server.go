@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net"
+	"text/template"
 	"time"
 
 	"google.golang.org/grpc"
@@ -15,8 +17,10 @@ import (
 	pb "computing-power/proto/v1"
 
 	"computing-power/pkg/trustgraph"
+	"computing-power/scheduler/internal/ca"
 	"computing-power/scheduler/internal/config"
 	"computing-power/scheduler/internal/events"
+	"computing-power/scheduler/internal/ipam"
 	"computing-power/scheduler/internal/registry"
 
 	"computing-power/scheduler/internal/scheduler"
@@ -30,13 +34,16 @@ type Server struct {
 	eventBus *events.Bus
 	engine   *scheduler.Engine
 	stopCh   chan struct{}
+	ca       *ca.Manager
+	ipam     *ipam.IPAM
 
 	heartbeatInterval time.Duration
 }
 
 // New 创建调度器服务器
 func New(st *store.Store, reg *registry.Registry, trust *trustgraph.Graph,
-	heartbeatInterval, heartbeatTimeout time.Duration, cfg *config.Config) *Server {
+	heartbeatInterval, heartbeatTimeout time.Duration, cfg *config.Config,
+	caMgr *ca.Manager, ipamMgr *ipam.IPAM) *Server {
 	reg.SetHeartbeatTimeout(heartbeatTimeout)
 
 	// 创建调度引擎
@@ -59,6 +66,8 @@ func New(st *store.Store, reg *registry.Registry, trust *trustgraph.Graph,
 		eventBus:          events.NewBus(),
 		engine:            eng,
 		stopCh:            make(chan struct{}),
+		ca:                caMgr,
+		ipam:              ipamMgr,
 		heartbeatInterval: heartbeatInterval,
 	}
 }
@@ -103,9 +112,39 @@ func (s *Server) Start(ctx context.Context, listen string, grpcServer *grpc.Serv
 // RegisterNode 注册新节点
 func (s *Server) RegisterNode(ctx context.Context, req *pb.RegisterNodeRequest) (*pb.RegisterNodeResponse, error) {
 	nodeID := generateNodeID(req.Name)
+
+	// 分配 Overlay IP
+	overlayIP, err := s.ipam.Allocate(nodeID)
+	if err != nil {
+		log.Printf("ipam allocate for %s: %v", nodeID, err)
+		// IPAM 失败时使用占位 IP（不影响节点注册）
+		overlayIP = "0.0.0.0"
+	}
+
+	// 签发 Nebula 证书（如果 CA 可用）
+	var nebulaCert, nebulaKey, caCert []byte
+	var nebulaConfig string
+	if s.ca != nil && s.ca.IsCAValid() {
+		ip := net.ParseIP(overlayIP)
+		ips := []net.IP{}
+		if ip != nil {
+			ips = append(ips, ip)
+		}
+		cert, key, err := s.ca.IssueNodeCert(nodeID, []string{"default"}, ips)
+		if err == nil {
+			nebulaCert = cert
+			nebulaKey = key
+			caCert = s.ca.CACertPEM()
+			nebulaConfig = s.buildNebulaConfig(overlayIP)
+		} else {
+			log.Printf("issue nebula cert for %s: %v", nodeID, err)
+		}
+	}
+
 	node := &pb.Node{
 		ID:           nodeID,
 		Name:         req.Name,
+		OverlayIP:    overlayIP,
 		PublicKey:    req.PublicKey,
 		Version:      req.Version,
 		Resources:    req.InitialResources,
@@ -121,16 +160,23 @@ func (s *Server) RegisterNode(ctx context.Context, req *pb.RegisterNodeRequest) 
 		return nil, status.Errorf(codes.Internal, "save node: %v", err)
 	}
 
-	log.Printf("node registered: %s (%s) version %s", nodeID, req.Name, req.Version)
+	log.Printf("node registered: %s (%s) version %s overlay %s", nodeID, req.Name, req.Version, overlayIP)
 	return &pb.RegisterNodeResponse{
-		NodeID:    nodeID,
-		OverlayIP: "10.1.0.1", // 占位，P6 阶段由 Nebula CA 分配
+		NodeID:             nodeID,
+		OverlayIP:          overlayIP,
+		NebulaCertificate:  nebulaCert,
+		NebulaPrivateKey:   nebulaKey,
+		NebulaConfig:       nebulaConfig,
+		CACertificate:      caCert,
 	}, nil
 }
 
 // UnregisterNode 注销节点
 func (s *Server) UnregisterNode(ctx context.Context, req *pb.UnregisterNodeRequest) (*pb.UnregisterNodeResponse, error) {
 	s.registry.Unregister(req.NodeID)
+	if err := s.ipam.Release(req.NodeID); err != nil {
+		log.Printf("ipam release for %s: %v", req.NodeID, err)
+	}
 	log.Printf("node unregistered: %s reason: %s", req.NodeID, req.Reason)
 	return &pb.UnregisterNodeResponse{Success: true}, nil
 }
@@ -542,8 +588,38 @@ func (s *Server) GetTrustGraph(ctx context.Context, req *pb.GetTrustGraphRequest
 
 // IssueCertificate 签发证书
 func (s *Server) IssueCertificate(ctx context.Context, req *pb.IssueCertRequest) (*pb.IssueCertResponse, error) {
-	// P6 阶段实现：内置 CA 签发 Nebula 证书
-	return &pb.IssueCertResponse{ExpiresAt: time.Now().Add(24 * time.Hour).UnixMilli()}, nil
+	if s.ca == nil || !s.ca.IsCAValid() {
+		return nil, status.Errorf(codes.FailedPrecondition, "CA not initialized")
+	}
+
+	// 解析 IP 列表
+	var ips []net.IP
+	if req.IPs != "" {
+		for _, ipStr := range splitCSV(req.IPs) {
+			if ip := net.ParseIP(ipStr); ip != nil {
+				ips = append(ips, ip)
+			}
+		}
+	}
+
+	// 解析分组
+	groups := []string{"default"}
+	if req.Group != "" {
+		groups = splitCSV(req.Group)
+	}
+
+	certPEM, _, err := s.ca.IssueNodeCert(req.NodeID, groups, ips)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "issue cert: %v", err)
+	}
+
+	return &pb.IssueCertResponse{
+		Certificate:   certPEM,
+		// 返回私钥（IssueCertResponse 没有 key 字段，但可通过其他方式传递）
+		// P6 阶段：节点私钥通过 RegisterNodeResponse 返回
+		CACertificate: s.ca.CACertPEM(),
+		ExpiresAt:     time.Now().Add(365 * 24 * time.Hour).UnixMilli(),
+	}, nil
 }
 
 // RenewCertificate 续期证书
@@ -601,4 +677,94 @@ func shortName(name string) string {
 		return name
 	}
 	return name[:8]
+}
+
+// buildNebulaConfig 生成 Nebula 节点配置 YAML
+func (s *Server) buildNebulaConfig(overlayIP string) string {
+	lighthouseIP := s.ipam.Gateway()
+	lighthouseAddr := "8.138.108.183:4242" // 默认生产环境地址
+
+	const tpl = `pki:
+  ca: /etc/nebula/ca.crt
+  cert: /etc/nebula/node.crt
+  key: /etc/nebula/node.key
+
+static_host_map:
+  "{{.LighthouseIP}}": ["{{.LighthouseAddr}}"]
+
+lighthouse:
+  am_lighthouse: false
+  interval: 60
+  hosts:
+    - "{{.LighthouseIP}}"
+
+listen:
+  host: 0.0.0.0
+  port: 0
+
+punchy:
+  punch: true
+  respond: true
+
+relay:
+  am_relay: false
+
+tun:
+  disabled: false
+  dev: cp0
+  drop_local_broadcast: false
+  drop_multicast: false
+  mtu: 1300
+
+firewall:
+  outbound_action: accept
+  inbound_action: drop
+  default_action: drop
+  conntrack:
+    tcp_timeout: 12m
+    udp_timeout: 3m
+    default_timeout: 10m
+  outbound:
+    - port: any
+      proto: any
+      host: any
+  inbound:
+    - port: any
+      proto: icmp
+      host: any
+`
+	data := struct {
+		LighthouseIP   string
+		LighthouseAddr string
+	}{
+		LighthouseIP:   lighthouseIP,
+		LighthouseAddr: lighthouseAddr,
+	}
+
+	var buf bytes.Buffer
+	tmpl, err := template.New("nebula").Parse(tpl)
+	if err != nil {
+		log.Printf("build nebula config template: %v", err)
+		return ""
+	}
+	if err := tmpl.Execute(&buf, data); err != nil {
+		log.Printf("build nebula config execute: %v", err)
+		return ""
+	}
+	return buf.String()
+}
+
+// splitCSV 解析逗号分隔的字符串
+func splitCSV(s string) []string {
+	var result []string
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ',' {
+			if i > start {
+				result = append(result, s[start:i])
+			}
+			start = i + 1
+		}
+	}
+	return result
 }

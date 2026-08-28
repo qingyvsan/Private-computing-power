@@ -1,0 +1,20 @@
+[Unit]
+Description=Computing Power Scheduler
+Documentation=https://github.com/your-org/computing-power
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cp-scheduler
+ExecStart=/opt/cp-scheduler/bin/scheduler --config /opt/cp-scheduler/configs/scheduler.yaml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+[Unit]
+Description=Computing Power Nebula Lighthouse
+Documentation=https://github.com/your-org/computing-power
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cp-scheduler
+ExecStart=/opt/cp-scheduler/bin/nebula -config /opt/cp-scheduler/configs/nebula/lighthouse.yml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

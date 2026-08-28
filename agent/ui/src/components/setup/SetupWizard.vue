@@ -14,7 +14,7 @@ const router = useRouter()
 const currentStep = ref(0)
 const loading = ref(false)
 const config = ref({
-  scheduler: { address: 'localhost:9090' },
+  scheduler: { address: '8.138.108.183:9090' },
   agent: { name: '' },
   resources: { max_cpu_cores: 0, max_memory_mb: 0, report_gpu: true },
   invite_code: '',

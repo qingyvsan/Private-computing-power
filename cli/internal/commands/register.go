@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -27,8 +28,8 @@ var registerCmd = &cobra.Command{
 		fingerprint := getHostFingerprint()
 
 		req := &pb.RegisterNodeRequest{
-			Name:    name,
-			InviteCode: inviteCode,
+			Name:               name,
+			InviteCode:         inviteCode,
 			HardwareFingerprint: fingerprint,
 		}
 
@@ -47,7 +48,37 @@ var registerCmd = &cobra.Command{
 		fmt.Printf("  节点 ID:   %s\n", resp.NodeID)
 		fmt.Printf("  Overlay IP: %s\n", resp.OverlayIP)
 
-		// TODO(P6): 保存 Nebula 证书和配置到本地
+		// 保存 Nebula 证书和配置到本地
+		if len(resp.NebulaCertificate) > 0 {
+			nebulaDir := filepath.Join(os.Getenv("HOME"), ".cp", "nebula")
+			if home := os.Getenv("HOME"); home == "" {
+				nebulaDir = filepath.Join(os.Getenv("USERPROFILE"), ".cp", "nebula")
+			}
+			if err := os.MkdirAll(nebulaDir, 0700); err != nil {
+				return fmt.Errorf("create nebula dir: %w", err)
+			}
+
+			files := map[string][]byte{
+				"ca.crt":       resp.CACertificate,
+				"node.crt":     resp.NebulaCertificate,
+				"node.key":     resp.NebulaPrivateKey,
+				"config.yaml":  []byte(resp.NebulaConfig),
+			}
+			for name, data := range files {
+				perm := os.FileMode(0644)
+				if name == "node.key" {
+					perm = 0600
+				}
+				if err := os.WriteFile(filepath.Join(nebulaDir, name), data, perm); err != nil {
+					return fmt.Errorf("write %s: %w", name, err)
+				}
+			}
+			fmt.Printf("  Nebula 证书: %s\n", nebulaDir)
+			fmt.Printf("  Nebula 状态: 已配置\n")
+		} else {
+			fmt.Printf("  Nebula 状态: 未配置（调度器未启用 Nebula）\n")
+		}
+
 		return nil
 	},
 }

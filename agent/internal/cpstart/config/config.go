@@ -37,7 +37,7 @@ func Default() *Config {
 	c := &Config{}
 	c.Agent.Name = hostname
 	c.Agent.DataDir = "./data/cpstart"
-	c.Scheduler.Address = "localhost:9090"
+	c.Scheduler.Address = "8.138.108.183:9090"
 	c.Resources.MaxCPUCores = 0 // 0 = 全部
 	c.Resources.MaxMemoryMB = 0 // 0 = 全部
 	c.Resources.ReportGPU = true
