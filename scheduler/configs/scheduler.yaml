@@ -57,6 +57,7 @@ invitation:
   code_length: 32
   code_expiry: "72h"
   max_uses_per_code: 1
+  admin_key: ""
 
 sync:
   enabled: false

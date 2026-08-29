@@ -320,3 +320,166 @@ func TestListUnitsByStatus(t *testing.T) {
 		t.Fatalf("expected 1 pending unit, got %d", len(pending))
 	}
 }
+
+
+// ========== 邀请码存储测试 ==========
+
+func TestSaveAndGetInviteCode(t *testing.T) {
+	st := newTestStore(t)
+	ic := &InviteCode{
+		Code:      "test-code-001",
+		CreatedBy: "node-1",
+		CreatedAt: 1000,
+		ExpiresAt: 2000,
+		MaxUses:   1,
+	}
+	if err := st.SaveInviteCode(ic); err != nil {
+		t.Fatalf("SaveInviteCode: %v", err)
+	}
+
+	got, err := st.GetInviteCode("test-code-001")
+	if err != nil {
+		t.Fatalf("GetInviteCode: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil invite code")
+	}
+	if got.Code != "test-code-001" {
+		t.Errorf("expected Code test-code-001, got %s", got.Code)
+	}
+	if got.CreatedBy != "node-1" {
+		t.Errorf("expected CreatedBy node-1, got %s", got.CreatedBy)
+	}
+}
+
+func TestGetInviteCode_NotFound(t *testing.T) {
+	st := newTestStore(t)
+	got, err := st.GetInviteCode("nonexistent")
+	if err != nil {
+		t.Fatalf("GetInviteCode: %v", err)
+	}
+	if got != nil {
+		t.Fatal("expected nil for nonexistent code")
+	}
+}
+
+func TestDeleteInviteCode(t *testing.T) {
+	st := newTestStore(t)
+	ic := &InviteCode{
+		Code:      "test-code-002",
+		CreatedBy: "node-1",
+		ExpiresAt: 2000,
+	}
+	if err := st.SaveInviteCode(ic); err != nil {
+		t.Fatalf("SaveInviteCode: %v", err)
+	}
+
+	if err := st.DeleteInviteCode("test-code-002"); err != nil {
+		t.Fatalf("DeleteInviteCode: %v", err)
+	}
+
+	got, err := st.GetInviteCode("test-code-002")
+	if err != nil {
+		t.Fatalf("GetInviteCode: %v", err)
+	}
+	if got != nil {
+		t.Fatal("expected nil after delete")
+	}
+}
+
+func TestListInviteCodes(t *testing.T) {
+	st := newTestStore(t)
+	codes := []*InviteCode{
+		{Code: "code-a", CreatedBy: "node-1", ExpiresAt: 1000},
+		{Code: "code-b", CreatedBy: "node-1", ExpiresAt: 2000},
+		{Code: "code-c", CreatedBy: "node-2", ExpiresAt: 3000},
+	}
+	for _, c := range codes {
+		if err := st.SaveInviteCode(c); err != nil {
+			t.Fatalf("SaveInviteCode: %v", err)
+		}
+	}
+
+	list, err := st.ListInviteCodes()
+	if err != nil {
+		t.Fatalf("ListInviteCodes: %v", err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("expected 3 codes, got %d", len(list))
+	}
+}
+
+func TestSaveInviteCode_Update(t *testing.T) {
+	st := newTestStore(t)
+	ic := &InviteCode{
+		Code:      "test-code-003",
+		CreatedBy: "node-1",
+		ExpiresAt: 2000,
+		MaxUses:   3,
+	}
+	if err := st.SaveInviteCode(ic); err != nil {
+		t.Fatalf("SaveInviteCode: %v", err)
+	}
+
+	// 更新使用计数
+	ic.UsedCount = 1
+	ic.RedeemedBy = []string{"node-2"}
+	if err := st.SaveInviteCode(ic); err != nil {
+		t.Fatalf("SaveInviteCode (update): %v", err)
+	}
+
+	got, err := st.GetInviteCode("test-code-003")
+	if err != nil {
+		t.Fatalf("GetInviteCode: %v", err)
+	}
+	if got.UsedCount != 1 {
+		t.Errorf("expected UsedCount 1, got %d", got.UsedCount)
+	}
+	if len(got.RedeemedBy) != 1 || got.RedeemedBy[0] != "node-2" {
+		t.Errorf("expected RedeemedBy [node-2], got %v", got.RedeemedBy)
+	}
+}
+
+func TestGetNodeByFingerprint(t *testing.T) {
+	st := newTestStore(t)
+	node1 := &pb.Node{
+		ID:                  "node-1",
+		Name:                "test-node-1",
+		HardwareFingerprint: "fp-001",
+		Status:              pb.NodeStatusOnline,
+	}
+	if err := st.SaveNode(node1); err != nil {
+		t.Fatalf("SaveNode: %v", err)
+	}
+
+	// 查找存在的指纹
+	got, err := st.GetNodeByFingerprint("fp-001")
+	if err != nil {
+		t.Fatalf("GetNodeByFingerprint: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected to find node by fingerprint")
+	}
+	if got.ID != "node-1" {
+		t.Errorf("expected node-1, got %s", got.ID)
+	}
+
+	// 查找不存在的指纹
+	got, err = st.GetNodeByFingerprint("fp-999")
+	if err != nil {
+		t.Fatalf("GetNodeByFingerprint: %v", err)
+	}
+	if got != nil {
+		t.Fatal("expected nil for nonexistent fingerprint")
+	}
+
+	// 空指纹
+	got, err = st.GetNodeByFingerprint("")
+	if err != nil {
+		t.Fatalf("GetNodeByFingerprint: %v", err)
+	}
+	if got != nil {
+		t.Fatal("expected nil for empty fingerprint")
+	}
+}
+

@@ -75,6 +75,7 @@ type Config struct {
 		CodeLength     int    `yaml:"code_length"`
 		CodeExpiry     string `yaml:"code_expiry"`
 		MaxUsesPerCode int    `yaml:"max_uses_per_code"`
+		AdminKey       string `yaml:"admin_key"`
 	} `yaml:"invitation"`
 
 	Sync struct {
@@ -139,6 +140,7 @@ func Default() *Config {
 	c.Invitation.CodeLength = 32
 	c.Invitation.CodeExpiry = "72h"
 	c.Invitation.MaxUsesPerCode = 1
+	c.Invitation.AdminKey = ""
 
 	c.Sync.Enabled = false
 	c.Sync.Role = "primary"

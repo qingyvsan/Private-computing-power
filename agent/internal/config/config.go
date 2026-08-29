@@ -17,12 +17,13 @@ type Config struct {
 	} `yaml:"agent"`
 
 	Scheduler struct {
-		Address            string `yaml:"address"`
-		TLSCert            string `yaml:"tls_cert"`
-		TLSKey             string `yaml:"tls_key"`
-		CACert             string `yaml:"ca_cert"`
-		ReconnectInitial   string `yaml:"reconnect_initial"`
-		ReconnectMax       string `yaml:"reconnect_max"`
+		Address            string  `yaml:"address"`
+		InviteCode         string  `yaml:"invite_code"`
+		TLSCert            string  `yaml:"tls_cert"`
+		TLSKey             string  `yaml:"tls_key"`
+		CACert             string  `yaml:"ca_cert"`
+		ReconnectInitial   string  `yaml:"reconnect_initial"`
+		ReconnectMax       string  `yaml:"reconnect_max"`
 		ReconnectMultiplier float64 `yaml:"reconnect_multiplier"`
 	} `yaml:"scheduler"`
 

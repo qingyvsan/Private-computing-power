@@ -50,7 +50,7 @@ func run(configPath string) error {
 	log.Printf("computing-power agent starting: %s", version.Info())
 
 	// 创建数据目录
-	dirs := []string{cfg.Agent.DataDir, cfg.Agent.TempDir, cfg.HAMI.ConfigDir}
+	dirs := []string{cfg.Agent.DataDir, cfg.Agent.TempDir, cfg.HAMI.ConfigDir, cfg.Updater.DownloadDir}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("create dir %s: %w", dir, err)

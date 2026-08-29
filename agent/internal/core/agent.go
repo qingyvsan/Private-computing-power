@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"runtime"
 	"time"
 
 	"google.golang.org/grpc"
@@ -16,6 +18,8 @@ import (
 	"computing-power/agent/internal/executor"
 	"computing-power/agent/internal/heartbeat"
 	"computing-power/agent/internal/nebula"
+	"computing-power/pkg/updater"
+	"computing-power/pkg/version"
 )
 
 // Agent 节点 Agent 生命周期管理器
@@ -27,10 +31,11 @@ type Agent struct {
 	collector *heartbeat.Collector
 	runtime   container.Runtime
 
-	manager  *executor.Manager
-	reporter *executor.Reporter
-	exec     *executor.Executor
+	manager   *executor.Manager
+	reporter  *executor.Reporter
+	exec      *executor.Executor
 	nebulaMgr *nebula.Manager
+	updater   *updater.Updater
 }
 
 // New 创建节点 Agent
@@ -49,6 +54,22 @@ func New(cfg *config.Config) (*Agent, error) {
 		cfg:       cfg,
 		nebulaMgr: nebulaMgr,
 		collector: heartbeat.NewCollector(cfg.Resources.ReportGPU, cfg.Resources.ReportNetwork, nebulaMgr),
+	}
+
+	// 初始化自动更新器
+	if cfg.Updater.Enabled {
+		uCfg := updater.Config{
+			Enabled:        cfg.Updater.Enabled,
+			CheckInterval:  parseDuration(cfg.Updater.CheckInterval, 6*time.Hour),
+			ManifestURL:    cfg.Updater.ManifestURL,
+			DownloadDir:    cfg.Updater.DownloadDir,
+			BackupCount:    cfg.Updater.BackupCount,
+			CurrentVersion: version.Short(),
+			BinaryPath:     os.Args[0],
+			Platform:       fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH),
+		}
+		a.updater = updater.New(uCfg)
+		log.Printf("updater enabled: interval=%s, manifest=%s", cfg.Updater.CheckInterval, cfg.Updater.ManifestURL)
 	}
 
 	// 初始化容器运行时
@@ -125,6 +146,11 @@ func (a *Agent) Start(ctx context.Context) error {
 		}
 	}()
 
+	// 启动自动更新器
+	if a.updater != nil {
+		a.updater.Start(ctx)
+	}
+
 	// 启动心跳上报
 	interval := parseDuration(a.cfg.Heartbeat.Interval, 3*time.Second)
 	jitter := parseDuration(a.cfg.Heartbeat.Jitter, 500*time.Millisecond)
@@ -152,9 +178,14 @@ func (a *Agent) register(ctx context.Context) (*pb.RegisterNodeResponse, error) 
 		name = "agent-" + fmt.Sprintf("%d", time.Now().UnixMilli()%100000)
 	}
 
+	// 收集硬件指纹
+	hostname, _ := os.Hostname()
+
 	req := &pb.RegisterNodeRequest{
-		Name:    name,
-		Version: "0.1.0-dev",
+		Name:                name,
+		InviteCode:          a.cfg.Scheduler.InviteCode,
+		HardwareFingerprint: hostname,
+		Version:             "0.1.0-dev",
 	}
 
 	resp, err := a.client.RegisterNode(ctx, req)

@@ -303,6 +303,7 @@ type Node struct {
 	Status              NodeStatus     `json:"status,omitempty" yaml:"status,omitempty"`
 	Resources           *NodeResources `json:"resources,omitempty" yaml:"resources,omitempty"`
 	Version             string         `json:"version,omitempty" yaml:"version,omitempty"`
+	HardwareFingerprint string         `json:"hardware_fingerprint,omitempty" yaml:"hardware_fingerprint,omitempty"`
 	NATType             string         `json:"nat_type,omitempty" yaml:"nat_type,omitempty"`
 	TrustList           []string       `json:"trust_list,omitempty" yaml:"trust_list,omitempty"`
 	BlockList           []string       `json:"block_list,omitempty" yaml:"block_list,omitempty"`

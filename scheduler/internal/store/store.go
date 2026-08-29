@@ -584,6 +584,103 @@ func (s *Store) ListIPAllocations() (map[string]string, error) {
 	return allocations, err
 }
 
+// ========== 邀请码存储 ==========
+
+// InviteCode 邀请码数据结构
+type InviteCode struct {
+	Code       string   `json:"code"`
+	CreatedBy  string   `json:"created_by"`
+	CreatedAt  int64    `json:"created_at"`
+	ExpiresAt  int64    `json:"expires_at"`
+	MaxUses    int32    `json:"max_uses"`
+	UsedCount  int32    `json:"used_count"`
+	RedeemedBy []string `json:"redeemed_by,omitempty"`
+	Used       bool     `json:"used"`
+}
+
+// SaveInviteCode 保存邀请码
+func (s *Store) SaveInviteCode(c *InviteCode) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketInvites)
+		data, err := json.Marshal(c)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(c.Code), data)
+	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeData, Key: "SaveInviteCode", Data: mustJSON(c)})
+	}
+	return err
+}
+
+// GetInviteCode 获取邀请码，未找到返回 nil
+func (s *Store) GetInviteCode(code string) (*InviteCode, error) {
+	var ic *InviteCode
+	err := s.db.View(func(tx *bolt.Tx) error {
+		data := tx.Bucket(bucketInvites).Get([]byte(code))
+		if data == nil {
+			return nil
+		}
+		var c InviteCode
+		if err := json.Unmarshal(data, &c); err != nil {
+			return err
+		}
+		ic = &c
+		return nil
+	})
+	return ic, err
+}
+
+// DeleteInviteCode 删除邀请码
+func (s *Store) DeleteInviteCode(code string) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketInvites).Delete([]byte(code))
+	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeDelete, Key: "DeleteInviteCode", Data: []byte(code)})
+	}
+	return err
+}
+
+// ListInviteCodes 列出所有邀请码
+func (s *Store) ListInviteCodes() ([]*InviteCode, error) {
+	var codes []*InviteCode
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketInvites).ForEach(func(k, v []byte) error {
+			var c InviteCode
+			if err := json.Unmarshal(v, &c); err != nil {
+				return err
+			}
+			codes = append(codes, &c)
+			return nil
+		})
+	})
+	return codes, err
+}
+
+// GetNodeByFingerprint 根据硬件指纹查找节点，未找到返回 nil
+func (s *Store) GetNodeByFingerprint(fingerprint string) (*pb.Node, error) {
+	if fingerprint == "" {
+		return nil, nil
+	}
+	var n *pb.Node
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketNodes).ForEach(func(k, v []byte) error {
+			var node pb.Node
+			if err := json.Unmarshal(v, &node); err != nil {
+				return err
+			}
+			if node.HardwareFingerprint == fingerprint {
+				n = &node
+				return nil // found
+			}
+			return nil
+		})
+	})
+	return n, err
+}
+
 // mustJSON 将对象序列化为 JSON，忽略错误（用于 WAL 写入——WAL 写入失败不应阻塞主流程）
 func mustJSON(v interface{}) []byte {
 	data, err := json.Marshal(v)

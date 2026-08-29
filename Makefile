@@ -61,7 +61,29 @@ build-all:
 		$(GO) build $(LDFLAGS) \
 			-o $(BIN_DIR)/$(subst /,-,$(platform))-cpcli \
 			./cli/cmd/cpcli; \
+		$(GO) build $(LDFLAGS) \
+			-o $(BIN_DIR)/$(subst /,-,$(platform))-cpstart \
+			./agent/cmd/cpstart; \
 	)
+
+# ========== 打包分发 ==========
+DIST_VERSION ?= $(VERSION)
+
+.PHONY: dist
+
+dist: build-all
+	@echo ">>> Packaging distribution $(DIST_VERSION)..."
+	@mkdir -p $(BIN_DIR)
+	@for platform in $(PLATFORMS); do \
+		platform_flat=$$(echo $$platform | tr / -); \
+		echo ">>> Packaging $$platform_flat..."; \
+		bash scripts/package.sh $(DIST_VERSION) $$platform_flat $(BIN_DIR); \
+	done
+	@echo ">>> Generating manifest..."
+	bash scripts/gen-manifest.sh $(DIST_VERSION)
+	@echo ">>> Generating installers..."
+	bash scripts/gen-installers.sh $(DIST_VERSION)
+	@echo ">>> Distribution ready: dist/$(DIST_VERSION)/"
 
 # ========== 测试 ==========
 test:

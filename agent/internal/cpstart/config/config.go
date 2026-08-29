@@ -86,6 +86,7 @@ func (c *Config) ToAgentConfig() *agentcfg.Config {
 	ac.Agent.Name = c.Agent.Name
 	ac.Agent.DataDir = c.Agent.DataDir
 	ac.Scheduler.Address = c.Scheduler.Address
+	ac.Scheduler.InviteCode = c.InviteCode
 	ac.Resources.ReportGPU = c.Resources.ReportGPU
 	return ac
 }

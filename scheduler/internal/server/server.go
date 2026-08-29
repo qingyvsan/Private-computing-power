@@ -3,9 +3,11 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"text/template"
 	"time"
@@ -37,6 +39,7 @@ type Server struct {
 	stopCh   chan struct{}
 	ca       *ca.Manager
 	ipam     *ipam.IPAM
+	cfg      *config.Config
 
 	heartbeatInterval time.Duration
 }
@@ -70,6 +73,7 @@ func New(st *store.Store, reg *registry.Registry, trust *trustgraph.Graph,
 		stopCh:            make(chan struct{}),
 		ca:                caMgr,
 		ipam:              ipamMgr,
+		cfg:               cfg,
 		heartbeatInterval: heartbeatInterval,
 	}
 }
@@ -118,6 +122,11 @@ func (s *Server) Start(ctx context.Context, listen string, grpcServer *grpc.Serv
 func (s *Server) RegisterNode(ctx context.Context, req *pb.RegisterNodeRequest) (*pb.RegisterNodeResponse, error) {
 	nodeID := generateNodeID(req.Name)
 
+	// 邀请码 / AdminKey / 冷启动验证
+	if err := s.validateRegistration(ctx, nodeID, req); err != nil {
+		return nil, err
+	}
+
 	// 分配 Overlay IP
 	overlayIP, err := s.ipam.Allocate(nodeID)
 	if err != nil {
@@ -147,17 +156,18 @@ func (s *Server) RegisterNode(ctx context.Context, req *pb.RegisterNodeRequest) 
 	}
 
 	node := &pb.Node{
-		ID:           nodeID,
-		Name:         req.Name,
-		OverlayIP:    overlayIP,
-		PublicKey:    req.PublicKey,
-		Version:      req.Version,
-		Resources:    req.InitialResources,
-		Status:       pb.NodeStatusOnline,
-		Discoverable: "trust_only",
-		RegisteredAt: time.Now().UnixMilli(),
-		Reputation:   1.0,
-		MaxTasks:     10,
+		ID:                  nodeID,
+		Name:                req.Name,
+		OverlayIP:           overlayIP,
+		PublicKey:           req.PublicKey,
+		HardwareFingerprint: req.HardwareFingerprint,
+		Version:             req.Version,
+		Resources:           req.InitialResources,
+		Status:              pb.NodeStatusOnline,
+		Discoverable:        "trust_only",
+		RegisteredAt:        time.Now().UnixMilli(),
+		Reputation:          1.0,
+		MaxTasks:            10,
 	}
 
 	s.registry.Register(node)
@@ -736,17 +746,155 @@ func (s *Server) RevokeCertificate(ctx context.Context, req *pb.RevokeCertReques
 
 // ========== 邀请码 ==========
 
+const inviteCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+// generateInviteCode 生成安全随机邀请码
+func (s *Server) generateInviteCode() (string, error) {
+	length := s.cfg.Invitation.CodeLength
+	if length <= 0 {
+		length = 32
+	}
+	code := make([]byte, length)
+	for i := range code {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(inviteCharset))))
+		if err != nil {
+			return "", fmt.Errorf("rand: %w", err)
+		}
+		code[i] = inviteCharset[n.Int64()]
+	}
+	return string(code), nil
+}
+
 // CreateInviteCode 创建邀请码
 func (s *Server) CreateInviteCode(ctx context.Context, req *pb.CreateInviteCodeRequest) (*pb.CreateInviteCodeResponse, error) {
+	code, err := s.generateInviteCode()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "generate code: %v", err)
+	}
+
+	// 解析过期时间
+	expiry := s.cfg.Invitation.CodeExpiry
+	if expiry == "" {
+		expiry = "72h"
+	}
+	expiryDur, err := time.ParseDuration(expiry)
+	if err != nil {
+		expiryDur = 72 * time.Hour
+	}
+
+	expiresAt := time.Now().Add(expiryDur).UnixMilli()
+	if req.ExpiresAt > 0 {
+		expiresAt = req.ExpiresAt
+	}
+
+	maxUses := int32(s.cfg.Invitation.MaxUsesPerCode)
+	if req.MaxUses > 0 {
+		maxUses = req.MaxUses
+	}
+
+	ic := &store.InviteCode{
+		Code:      code,
+		CreatedBy: req.NodeID,
+		CreatedAt: time.Now().UnixMilli(),
+		ExpiresAt: expiresAt,
+		MaxUses:   maxUses,
+	}
+
+	if err := s.store.SaveInviteCode(ic); err != nil {
+		return nil, status.Errorf(codes.Internal, "save invite code: %v", err)
+	}
+
+	log.Printf("invite code created: %s by %s, expires %d", code, req.NodeID, expiresAt)
 	return &pb.CreateInviteCodeResponse{
-		Code:      "placeholder-invite-code",
-		ExpiresAt: time.Now().Add(72 * time.Hour).UnixMilli(),
+		Code:      code,
+		ExpiresAt: expiresAt,
 	}, nil
 }
 
 // RedeemInviteCode 兑换邀请码
 func (s *Server) RedeemInviteCode(ctx context.Context, req *pb.RedeemInviteCodeRequest) (*pb.RedeemInviteCodeResponse, error) {
-	return &pb.RedeemInviteCodeResponse{Valid: true, Message: "redeemed"}, nil
+	ic, err := s.store.GetInviteCode(req.Code)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get invite code: %v", err)
+	}
+	if ic == nil {
+		return &pb.RedeemInviteCodeResponse{Valid: false, Message: "invite code not found"}, nil
+	}
+
+	// 检查过期
+	if time.Now().UnixMilli() > ic.ExpiresAt {
+		return &pb.RedeemInviteCodeResponse{Valid: false, Message: "invite code expired"}, nil
+	}
+
+	// 检查使用次数
+	if ic.Used || ic.UsedCount >= ic.MaxUses {
+		return &pb.RedeemInviteCodeResponse{Valid: false, Message: "invite code already used"}, nil
+	}
+
+	// 更新使用状态
+	ic.UsedCount++
+	ic.RedeemedBy = append(ic.RedeemedBy, req.NodeID)
+	if ic.UsedCount >= ic.MaxUses {
+		ic.Used = true
+	}
+
+	if err := s.store.SaveInviteCode(ic); err != nil {
+		return nil, status.Errorf(codes.Internal, "update invite code: %v", err)
+	}
+
+	log.Printf("invite code redeemed: %s by %s", req.Code, req.NodeID)
+	return &pb.RedeemInviteCodeResponse{Valid: true, Message: "invite code redeemed successfully"}, nil
+}
+
+// validateRegistration 检查注册请求是否合法（邀请码 / AdminKey / 冷启动 / 硬件指纹）
+func (s *Server) validateRegistration(ctx context.Context, nodeID string, req *pb.RegisterNodeRequest) error {
+	// AdminKey 绕过
+	if s.cfg.Invitation.AdminKey != "" && req.InviteCode == s.cfg.Invitation.AdminKey {
+		return nil
+	}
+
+	// 检查集群是否已有节点（冷启动检测）
+	existingNodes, err := s.store.ListNodes()
+	if err != nil {
+		return status.Errorf(codes.Internal, "check existing nodes: %v", err)
+	}
+
+	if len(existingNodes) == 0 {
+		// 冷启动：首个节点免邀请码
+		return nil
+	}
+
+	// 已有节点：必须提供邀请码
+	if req.InviteCode == "" {
+		return status.Errorf(codes.PermissionDenied, "invite code required for registration")
+	}
+
+	// 兑换邀请码
+	redeemResp, err := s.RedeemInviteCode(ctx, &pb.RedeemInviteCodeRequest{
+		Code:               req.InviteCode,
+		NodeID:             nodeID,
+		PublicKey:          req.PublicKey,
+		HardwareFingerprint: req.HardwareFingerprint,
+	})
+	if err != nil {
+		return err
+	}
+	if !redeemResp.Valid {
+		return status.Errorf(codes.PermissionDenied, "invalid invite code: %s", redeemResp.Message)
+	}
+
+	// 硬件指纹重复检查
+	if req.HardwareFingerprint != "" {
+		existing, err := s.store.GetNodeByFingerprint(req.HardwareFingerprint)
+		if err != nil {
+			return status.Errorf(codes.Internal, "check fingerprint: %v", err)
+		}
+		if existing != nil {
+			return status.Errorf(codes.AlreadyExists, "node with this hardware fingerprint already registered: %s", existing.ID)
+		}
+	}
+
+	return nil
 }
 
 // ========== 节点查询 ==========

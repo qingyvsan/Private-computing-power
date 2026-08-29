@@ -12,11 +12,17 @@ import (
 	"computing-power/pkg/trustgraph"
 
 	"computing-power/scheduler/internal/config"
+	"computing-power/scheduler/internal/ipam"
 	"computing-power/scheduler/internal/registry"
 	"computing-power/scheduler/internal/store"
 )
 
 func newTestServer(t *testing.T) *Server {
+	t.Helper()
+	return newTestServerWithConfig(t, config.Default())
+}
+
+func newTestServerWithConfig(t *testing.T, cfg *config.Config) *Server {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
@@ -29,7 +35,11 @@ func newTestServer(t *testing.T) *Server {
 		os.Remove(path)
 	})
 	reg := registry.NewRegistry(1000, 100, 4.0)
-	srv := New(st, reg, trustgraph.NewGraph(), 3*time.Second, 30*time.Second, config.Default(), nil, nil)
+	ipamMgr, err := ipam.NewIPAM(st, "10.1.0.0/16", "10.1.0.1")
+	if err != nil {
+		t.Fatalf("ipam: %v", err)
+	}
+	srv := New(st, reg, trustgraph.NewGraph(), 3*time.Second, 30*time.Second, cfg, nil, ipamMgr)
 	return srv
 }
 
@@ -367,5 +377,223 @@ func TestSubmitJob_InvalidSplit(t *testing.T) {
 	_, err := srv.SubmitJob(context.Background(), &pb.SubmitJobRequest{Job: job})
 	if err == nil {
 		t.Fatal("expected error for invalid split config")
+	}
+}
+
+// ========== 邀请码测试 ==========
+
+func TestCreateInviteCode(t *testing.T) {
+	srv := newTestServer(t)
+	resp, err := srv.CreateInviteCode(context.Background(), &pb.CreateInviteCodeRequest{
+		NodeID: "node-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateInviteCode: %v", err)
+	}
+	if resp.Code == "" {
+		t.Fatal("expected non-empty invite code")
+	}
+	if len(resp.Code) != 32 {
+		t.Errorf("expected code length 32, got %d", len(resp.Code))
+	}
+	if resp.ExpiresAt <= time.Now().UnixMilli() {
+		t.Error("expected ExpiresAt in the future")
+	}
+}
+
+func TestCreateInviteCode_CustomExpiry(t *testing.T) {
+	srv := newTestServer(t)
+	future := time.Now().Add(24 * time.Hour).UnixMilli()
+	resp, err := srv.CreateInviteCode(context.Background(), &pb.CreateInviteCodeRequest{
+		NodeID:    "node-1",
+		ExpiresAt: future,
+	})
+	if err != nil {
+		t.Fatalf("CreateInviteCode: %v", err)
+	}
+	if resp.ExpiresAt != future {
+		t.Errorf("expected ExpiresAt %d, got %d", future, resp.ExpiresAt)
+	}
+}
+
+func TestRedeemInviteCode_Valid(t *testing.T) {
+	srv := newTestServer(t)
+	createResp, err := srv.CreateInviteCode(context.Background(), &pb.CreateInviteCodeRequest{
+		NodeID: "node-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateInviteCode: %v", err)
+	}
+
+	redeemResp, err := srv.RedeemInviteCode(context.Background(), &pb.RedeemInviteCodeRequest{
+		Code:   createResp.Code,
+		NodeID: "node-2",
+	})
+	if err != nil {
+		t.Fatalf("RedeemInviteCode: %v", err)
+	}
+	if !redeemResp.Valid {
+		t.Fatalf("expected Valid=true, got Valid=false: %s", redeemResp.Message)
+	}
+}
+
+func TestRedeemInviteCode_NotFound(t *testing.T) {
+	srv := newTestServer(t)
+	resp, err := srv.RedeemInviteCode(context.Background(), &pb.RedeemInviteCodeRequest{
+		Code:   "nonexistent-code",
+		NodeID: "node-1",
+	})
+	if err != nil {
+		t.Fatalf("RedeemInviteCode: %v", err)
+	}
+	if resp.Valid {
+		t.Fatal("expected Valid=false for nonexistent code")
+	}
+}
+
+func TestRedeemInviteCode_AlreadyUsed(t *testing.T) {
+	srv := newTestServer(t)
+	createResp, err := srv.CreateInviteCode(context.Background(), &pb.CreateInviteCodeRequest{
+		NodeID: "node-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateInviteCode: %v", err)
+	}
+
+	// 第一次兑换
+	redeemResp, err := srv.RedeemInviteCode(context.Background(), &pb.RedeemInviteCodeRequest{
+		Code:   createResp.Code,
+		NodeID: "node-2",
+	})
+	if err != nil {
+		t.Fatalf("RedeemInviteCode: %v", err)
+	}
+	if !redeemResp.Valid {
+		t.Fatalf("expected first redeem to succeed: %s", redeemResp.Message)
+	}
+
+	// 第二次兑换（应失败）
+	redeemResp2, err := srv.RedeemInviteCode(context.Background(), &pb.RedeemInviteCodeRequest{
+		Code:   createResp.Code,
+		NodeID: "node-3",
+	})
+	if err != nil {
+		t.Fatalf("RedeemInviteCode: %v", err)
+	}
+	if redeemResp2.Valid {
+		t.Fatal("expected second redeem to fail")
+	}
+}
+
+func TestRegisterNode_ColdStart(t *testing.T) {
+	srv := newTestServer(t)
+	resp, err := srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
+		Name: "first-node",
+	})
+	if err != nil {
+		t.Fatalf("RegisterNode (cold start): %v", err)
+	}
+	if resp.NodeID == "" {
+		t.Fatal("expected non-empty node ID")
+	}
+}
+
+func TestRegisterNode_WithoutInvite(t *testing.T) {
+	srv := newTestServer(t)
+	// 先注册一个节点（冷启动）
+	_, err := srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
+		Name: "node-1",
+	})
+	if err != nil {
+		t.Fatalf("first node: %v", err)
+	}
+
+	// 第二个节点无邀请码应失败
+	_, err = srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
+		Name: "node-2",
+	})
+	if err == nil {
+		t.Fatal("expected error for registration without invite code")
+	}
+}
+
+func TestRegisterNode_WithValidInvite(t *testing.T) {
+	srv := newTestServer(t)
+	// 先注册一个节点（冷启动）
+	_, err := srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
+		Name: "node-1",
+	})
+	if err != nil {
+		t.Fatalf("first node: %v", err)
+	}
+
+	// 创建邀请码
+	inviteResp, err := srv.CreateInviteCode(context.Background(), &pb.CreateInviteCodeRequest{
+		NodeID: "node-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateInviteCode: %v", err)
+	}
+
+	// 持邀请码注册
+	_, err = srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
+		Name:       "node-2",
+		InviteCode: inviteResp.Code,
+	})
+	if err != nil {
+		t.Fatalf("RegisterNode with invite code: %v", err)
+	}
+}
+
+func TestRegisterNode_WithAdminKey(t *testing.T) {
+	cfg := config.Default()
+	cfg.Invitation.AdminKey = "my-admin-key-123"
+	srv := newTestServerWithConfig(t, cfg)
+
+	// 先注册一个节点（冷启动）
+	_, err := srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
+		Name: "node-1",
+	})
+	if err != nil {
+		t.Fatalf("first node: %v", err)
+	}
+
+	// 第二个节点使用 AdminKey 绕过邀请码
+	_, err = srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
+		Name:       "node-2",
+		InviteCode: "my-admin-key-123",
+	})
+	if err != nil {
+		t.Fatalf("RegisterNode with admin key: %v", err)
+	}
+}
+
+func TestRegisterNode_DuplicateFingerprint(t *testing.T) {
+	srv := newTestServer(t)
+	// 注册第一个节点
+	_, err := srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
+		Name:                "node-1",
+		HardwareFingerprint: "abc-123",
+	})
+	if err != nil {
+		t.Fatalf("first node: %v", err)
+	}
+
+	// 第二个节点需要邀请码
+	inviteResp, err := srv.CreateInviteCode(context.Background(), &pb.CreateInviteCodeRequest{
+		NodeID: "node-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateInviteCode: %v", err)
+	}
+
+	// 使用相同硬件指纹注册应失败
+	_, err = srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
+		Name:                "node-2",
+		InviteCode:          inviteResp.Code,
+		HardwareFingerprint: "abc-123",
+	})
+	if err == nil {
+		t.Fatal("expected error for duplicate hardware fingerprint")
 	}
 }

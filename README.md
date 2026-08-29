@@ -13,16 +13,19 @@
 - **φ-accrual 故障检测**：自适应超时判断节点健康，误判率可控
 - **信任图**：有向信任关系 + ECDSA 签名，仅信任节点间可调度
 - **Web 控制台**：用户主机一键启动（`cpstart`），浏览器完成首次配置向导后加入集群
-- **GPU 共享**：HAMi Standalone 模式显存隔离（规划中）
-- **Overlay 网络**：Nebula + Lighthouse NAT 穿透（规划中）
-- **邀请码注册**：邀请制接入私域成员（规划中）
+- **GPU 共享**：HAMi Standalone 模式显存隔离
+- **Overlay 网络**：Nebula + Lighthouse NAT 穿透，节点间 P2P 通信
+- **邀请码注册**：邀请制接入私域成员，可选管理员密钥
+- **WAL 热备**：双节点故障切换 ≤ 30s，RPO ≤ 5s
+- **自动更新**：内建更新器，定时检查 + 下载 + 校验 + 原子替换 + 备份回滚
+- **跨平台客户端**：5 平台分发包（linux/amd64+arm64, windows/amd64, darwin/amd64+arm64）
 
 ## 快速开始（统一使用流程）
 
 ```
 ① 中央服务器：部署调度器（headless，仅 gRPC :9090）
-② 打包分发：客户端压缩包发给用户（cpstart + agent + 内嵌前端）
-③ 用户启动：解压 → 双击 cpstart → 自动拉起服务 → 浏览器打开控制台
+② 打包分发：`make dist VERSION=v0.1.0` 产出 5 平台分发包
+③ 用户安装：一键安装脚本自动下载 + 解压 + 注册系统服务
 ④ 首次配置向导：连接调度器 / 节点身份+邀请码 / 共享资源 / 环境检测
 ⑤ 加入集群：节点注册上线，控制台开始操作
 ```
@@ -35,6 +38,17 @@ go build -o bin/scheduler ./scheduler/cmd/scheduler
 
 # 运行（监听 gRPC :9090）
 ./bin/scheduler --config ./scheduler/configs/scheduler.yaml
+```
+
+### 安装 Agent（一键安装）
+
+```bash
+# Linux/macOS
+curl -fsSL https://update.computing-power.local/install.sh | bash
+INVITE_CODE=xxxx bash scripts/install.sh
+
+# Windows
+powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
 ### 用户主机一键启动（P3.5 起）
@@ -50,11 +64,13 @@ go build -o bin/scheduler ./scheduler/cmd/scheduler
 ```
 ├── api/proto/v1/            # Protobuf 规范（common / scheduler）
 ├── proto/v1/                # Go 类型 + JSON codec
-├── pkg/                     # 共享库（phidetector / trustgraph / taskmodel / resource / wal / certutil ...）
+├── pkg/                     # 共享库（phidetector / trustgraph / taskmodel / resource / wal / certutil / updater ...）
 ├── scheduler/               # 中央调度器（store / registry / server）
 ├── agent/                   # 节点 Agent（heartbeat / container / core）
 ├── cli/                     # cpcli 命令行 + cpstart 一键启动
 ├── web/                     # Web 控制台前端（P3.5）
+├── scripts/                 # 打包分发 + 安装脚本
+├── deploy/                  # 部署工具（scheduler systemd + Nebula Lighthouse）
 └── test/fixtures/           # 作业 YAML 测试用例
 ```
 
@@ -69,13 +85,19 @@ go build -o bin/scheduler ./scheduler/cmd/scheduler
 | CLI | Cobra |
 | 配置 | YAML |
 
-## 开发
+## 构建
 
 ```bash
 # 构建三个二进制
 go build -o bin/scheduler ./scheduler/cmd/scheduler
 go build -o bin/agent      ./agent/cmd/agent
 go build -o bin/cpcli      ./cli/cmd/cpcli
+
+# 构建一键启动器（含内嵌前端）
+make build-cpstart
+
+# 全平台交叉编译 + 打包分发
+make dist VERSION=v0.1.0
 
 # 测试
 go test -race ./pkg/... ./scheduler/... ./agent/... ./cli/...
@@ -86,17 +108,18 @@ go test -race ./pkg/... ./scheduler/... ./agent/... ./cli/...
 | 阶段 | 内容 | 状态 |
 |------|------|------|
 | P0 | 项目骨架 + gRPC 握手 | ✅ 已完成 |
-| P1 | 注册与心跳强化 + φ 故障检测 | ⬜ |
-| P2 | 任务模型落库（BoltDB） | ⬜ |
-| P3 | 调度引擎（过滤/评分/分配） | ⬜ |
-| P3.5 | 用户主机 Web 控制台 + 一键启动 | ⬜ |
-| P4 | Agent 容器执行 | ⬜ |
-| P5 | GPU 管理（HAMi） | ⬜ |
-| P6 | Nebula Overlay 网络 | ⬜ |
-| P7 | 信任图 | ⬜ |
-| P8 | WAL 热备 | ⬜ |
-| P9 | 邀请码 | ⬜ |
-| P10 | 打包分发 | ⬜ |
+| P1 | 注册与心跳强化 + φ 故障检测 | ✅ 已完成 |
+| P2 | 任务模型落库（BoltDB） | ✅ 已完成 |
+| P3 | 调度引擎（过滤/评分/分配） | ✅ 已完成 |
+| P3.5 | 用户主机 Web 控制台 + 一键启动 | ✅ 已完成 |
+| P4 | Agent 容器执行 | ✅ 已完成 |
+| P5 | GPU 管理（HAMi） | ✅ 已完成 |
+| P6 | Nebula Overlay 网络 | ✅ 已完成 |
+| P7 | 信任图 | ✅ 已完成 |
+| P8 | WAL 热备 | ✅ 已完成 |
+| P9 | 邀请码 | ✅ 已完成 |
+| P10 | 打包分发 + 自动更新 + 安装脚本 | ✅ 已完成 |
+| 远期 | 自动任务拆分 | ⬜ 规划中 |
 
 ## 许可证
 

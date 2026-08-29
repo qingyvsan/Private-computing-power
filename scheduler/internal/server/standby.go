@@ -331,6 +331,16 @@ func replayEntry(st *store.Store, entry *pb.SyncWALEntry) error {
 	case "DeleteIPAllocation":
 		return st.DeleteIPAllocation(string(entry.Data))
 
+	case "SaveInviteCode":
+		var ic store.InviteCode
+		if err := json.Unmarshal(entry.Data, &ic); err != nil {
+			return err
+		}
+		return st.SaveInviteCode(&ic)
+
+	case "DeleteInviteCode":
+		return st.DeleteInviteCode(string(entry.Data))
+
 	default:
 		log.Printf("[standby] unknown WAL entry key: %s", entry.Key)
 		return nil

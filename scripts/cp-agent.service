@@ -1,0 +1,18 @@
+[Unit]
+Description=Computing Power Agent
+Documentation=https://github.com/your-org/computing-power
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cp-agent
+ExecStart=/opt/cp-agent/bin/cpstart --config /opt/cp-agent/configs/cpstart.yaml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

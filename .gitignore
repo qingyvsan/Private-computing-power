@@ -2,6 +2,9 @@
 bin/
 *.exe
 
+# ===== 分发包 =====
+dist/
+
 # ===== 前端构建 =====
 agent/ui/dist/
 agent/ui/node_modules/
