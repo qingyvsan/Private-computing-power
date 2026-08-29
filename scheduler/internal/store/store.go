@@ -3,11 +3,13 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
 
 	pb "computing-power/proto/v1"
+	"computing-power/pkg/wal"
 )
 
 // 数据库 Bucket 名称
@@ -25,7 +27,10 @@ var (
 
 // Store 是调度器的持久化层（BoltDB 实现）
 type Store struct {
-	db *bolt.DB
+	db         *bolt.DB
+	walWriter  *wal.Writer
+	walEnabled bool
+	replaying  bool // WAL 回放模式（不写入 WAL）
 }
 
 // Open 打开数据库
@@ -66,14 +71,54 @@ func (s *Store) init() error {
 
 // Close 关闭数据库
 func (s *Store) Close() error {
+	if s.walWriter != nil {
+		s.walWriter.Close()
+	}
 	return s.db.Close()
+}
+
+// EnableWAL 启用 WAL 写入（所有 mutation 操作将同时记录到 WAL）
+func (s *Store) EnableWAL(w *wal.Writer) {
+	s.walWriter = w
+	s.walEnabled = true
+}
+
+// GetLastSequence 返回 WAL 最后写入的序列号
+func (s *Store) GetLastSequence() uint64 {
+	if s.walWriter == nil {
+		return 0
+	}
+	return s.walWriter.LastSequence()
+}
+
+// ReadWALFrom 从 WAL 读取从指定序列号开始的条目
+func (s *Store) ReadWALFrom(seq uint64) ([]*wal.Entry, error) {
+	r, err := wal.NewReader(s.walWriter.Dir())
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return r.ReadFrom(seq)
+}
+
+// walWrite 写入 WAL 条目（仅在 WAL 启用且非回放模式时）
+func (s *Store) walWrite(entry wal.Entry) {
+	if !s.walEnabled || s.walWriter == nil || s.replaying {
+		return
+	}
+	s.walWriter.Write(entry)
+}
+
+// SetReplaying 设置回放模式（回放时不写入 WAL，避免循环同步）
+func (s *Store) SetReplaying(replaying bool) {
+	s.replaying = replaying
 }
 
 // ========== 节点存储 ==========
 
 // SaveNode 保存节点信息
 func (s *Store) SaveNode(n *pb.Node) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketNodes)
 		data, err := json.Marshal(n)
 		if err != nil {
@@ -86,6 +131,10 @@ func (s *Store) SaveNode(n *pb.Node) error {
 		idx := tx.Bucket(bucketIndexNode)
 		return idx.Put([]byte(fmt.Sprintf("%d:%s", n.Status, n.ID)), []byte(n.ID))
 	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeData, Key: "SaveNode", Data: mustJSON(n)})
+	}
+	return err
 }
 
 // GetNode 获取节点信息
@@ -124,7 +173,7 @@ func (s *Store) ListNodes() ([]*pb.Node, error) {
 
 // DeleteNode 删除节点
 func (s *Store) DeleteNode(nodeID string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		if err := tx.Bucket(bucketNodes).Delete([]byte(nodeID)); err != nil {
 			return err
 		}
@@ -135,13 +184,17 @@ func (s *Store) DeleteNode(nodeID string) error {
 			return nil
 		})
 	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeDelete, Key: "DeleteNode", Data: []byte(nodeID)})
+	}
+	return err
 }
 
 // ========== 作业存储 ==========
 
 // SaveJob 保存作业
 func (s *Store) SaveJob(j *pb.Job) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketJobs)
 		data, err := json.Marshal(j)
 		if err != nil {
@@ -154,6 +207,10 @@ func (s *Store) SaveJob(j *pb.Job) error {
 		idx := tx.Bucket(bucketIndexJob)
 		return idx.Put([]byte(fmt.Sprintf("%s:%s", j.OwnerID, j.ID)), []byte(j.ID))
 	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeData, Key: "SaveJob", Data: mustJSON(j)})
+	}
+	return err
 }
 
 // GetJob 获取作业
@@ -194,7 +251,7 @@ func (s *Store) ListJobs(ownerID string) ([]*pb.Job, error) {
 
 // UpdateJobStatus 更新作业状态
 func (s *Store) UpdateJobStatus(jobID string, status pb.JobStatus) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketJobs)
 		data := b.Get([]byte(jobID))
 		if data == nil {
@@ -215,13 +272,17 @@ func (s *Store) UpdateJobStatus(jobID string, status pb.JobStatus) error {
 		}
 		return b.Put([]byte(jobID), newData)
 	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeData, Key: "UpdateJobStatus", Data: mustJSON(map[string]interface{}{"job_id": jobID, "status": status})})
+	}
+	return err
 }
 
 // ========== Unit 存储 ==========
 
 // SaveUnit 保存 Unit
 func (s *Store) SaveUnit(u *pb.Unit) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketUnits)
 		data, err := json.Marshal(u)
 		if err != nil {
@@ -229,6 +290,10 @@ func (s *Store) SaveUnit(u *pb.Unit) error {
 		}
 		return b.Put([]byte(u.ID), data)
 	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeData, Key: "SaveUnit", Data: mustJSON(u)})
+	}
+	return err
 }
 
 // GetUnit 获取 Unit
@@ -335,12 +400,15 @@ func (s *Store) UpdateUnitStatus(unitID string, status pb.UnitStatus, exitCode i
 		u = &unit
 		return nil
 	})
+	if err == nil && u != nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeData, Key: "SaveUnit", Data: mustJSON(u)})
+	}
 	return u, err
 }
 
 // UpdateStageStatus 更新阶段状态（从 Job 中查找并更新 Stage）
 func (s *Store) UpdateStageStatus(stageID string, status pb.StageStatus) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		// 需要遍历 jobs 找到包含该 stage 的 job
 		return tx.Bucket(bucketJobs).ForEach(func(k, v []byte) error {
 			var j pb.Job
@@ -361,11 +429,15 @@ func (s *Store) UpdateStageStatus(stageID string, status pb.StageStatus) error {
 			return nil
 		})
 	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeData, Key: "UpdateStageStatus", Data: mustJSON(map[string]interface{}{"stage_id": stageID, "status": status})})
+	}
+	return err
 }
 
 // DeleteJob 级联删除作业及其所有 Unit
 func (s *Store) DeleteJob(jobID string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		// 删除关联的 Unit
 		unitB := tx.Bucket(bucketUnits)
 		if err := unitB.ForEach(func(k, v []byte) error {
@@ -394,6 +466,10 @@ func (s *Store) DeleteJob(jobID string) error {
 			return nil
 		})
 	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeDelete, Key: "DeleteJob", Data: []byte(jobID)})
+	}
+	return err
 }
 
 // ListJobsByStatus 按状态列出作业
@@ -418,7 +494,7 @@ func (s *Store) ListJobsByStatus(status pb.JobStatus) ([]*pb.Job, error) {
 
 // SaveTrustEdge 保存信任边
 func (s *Store) SaveTrustEdge(e *pb.TrustEdge) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTrust)
 		data, err := json.Marshal(e)
 		if err != nil {
@@ -426,13 +502,21 @@ func (s *Store) SaveTrustEdge(e *pb.TrustEdge) error {
 		}
 		return b.Put([]byte(fmt.Sprintf("%s:%s", e.FromNode, e.ToNode)), data)
 	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeData, Key: "SaveTrustEdge", Data: mustJSON(e)})
+	}
+	return err
 }
 
 // DeleteTrustEdge 删除信任边
 func (s *Store) DeleteTrustEdge(from, to string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketTrust).Delete([]byte(fmt.Sprintf("%s:%s", from, to)))
 	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeDelete, Key: "DeleteTrustEdge", Data: mustJSON(map[string]string{"from": from, "to": to})})
+	}
+	return err
 }
 
 // ListTrustEdges 列出所有信任边
@@ -455,9 +539,13 @@ func (s *Store) ListTrustEdges() ([]*pb.TrustEdge, error) {
 
 // SaveIPAllocation 保存 IP 分配记录
 func (s *Store) SaveIPAllocation(nodeID, ip string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketIPAM).Put([]byte(nodeID), []byte(ip))
 	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeData, Key: "SaveIPAllocation", Data: mustJSON(map[string]string{"node_id": nodeID, "ip": ip})})
+	}
+	return err
 }
 
 // GetIPAllocation 获取节点的 IP 分配；返回空字符串表示未分配
@@ -475,9 +563,13 @@ func (s *Store) GetIPAllocation(nodeID string) (string, error) {
 
 // DeleteIPAllocation 删除 IP 分配记录
 func (s *Store) DeleteIPAllocation(nodeID string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketIPAM).Delete([]byte(nodeID))
 	})
+	if err == nil {
+		s.walWrite(wal.Entry{Type: wal.EntryTypeDelete, Key: "DeleteIPAllocation", Data: []byte(nodeID)})
+	}
+	return err
 }
 
 // ListIPAllocations 列出所有 IP 分配记录
@@ -490,4 +582,28 @@ func (s *Store) ListIPAllocations() (map[string]string, error) {
 		})
 	})
 	return allocations, err
+}
+
+// mustJSON 将对象序列化为 JSON，忽略错误（用于 WAL 写入——WAL 写入失败不应阻塞主流程）
+func mustJSON(v interface{}) []byte {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return []byte(fmt.Sprintf(`{"marshal_error":"%s"}`, err.Error()))
+	}
+	return data
+}
+
+// Backup 创建 BoltDB 一致性快照
+func (s *Store) Backup(path string) error {
+	return s.db.View(func(tx *bolt.Tx) error {
+		f, err := os.Create(path)
+		if err != nil {
+			return fmt.Errorf("create backup: %w", err)
+		}
+		defer f.Close()
+		if _, err := tx.WriteTo(f); err != nil {
+			return fmt.Errorf("write backup: %w", err)
+		}
+		return nil
+	})
 }

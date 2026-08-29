@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -260,9 +261,10 @@ func TestGetJob_NotFound(t *testing.T) {
 
 func TestListJobs(t *testing.T) {
 	srv := newTestServer(t)
-	// Submit two jobs
+	// Submit two jobs with explicit IDs to avoid flaky ID collision
 	for _, name := range []string{"job-a", "job-b"} {
 		job := &pb.Job{
+			ID:      fmt.Sprintf("list-job-%s", name),
 			Name:    name,
 			Type:    pb.JobTypeSingle,
 			OwnerID: "node-1",

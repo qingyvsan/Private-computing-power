@@ -9,6 +9,8 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -254,7 +256,10 @@ func SignTrust(key *ecdsa.PrivateKey, from, to string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sign failed: %w", err)
 	}
-	sig := append(r.Bytes(), s.Bytes()...)
+	// 固定 64 字节编码（各 32 字节），确保 VerifyTrust 可正确分割
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	s.FillBytes(sig[32:])
 	return sig, nil
 }
 
@@ -303,4 +308,50 @@ func MarshalPublicKey(key *ecdsa.PublicKey) ([]byte, error) {
 		Type:  "PUBLIC KEY",
 		Bytes: pubBytes,
 	}), nil
+}
+
+// SavePrivateKey 保存 ECDSA 私钥到 PEM 文件
+func SavePrivateKey(key *ecdsa.PrivateKey, path string) error {
+	keyBytes, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return fmt.Errorf("marshal private key: %w", err)
+	}
+	pemBlock := &pem.Block{
+		Type:  "EC PRIVATE KEY",
+		Bytes: keyBytes,
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create key dir: %w", err)
+	}
+	return os.WriteFile(path, pem.EncodeToMemory(pemBlock), 0600)
+}
+
+// LoadPrivateKey 从 PEM 文件加载 ECDSA 私钥
+func LoadPrivateKey(path string) (*ecdsa.PrivateKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read key file: %w", err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode private key PEM")
+	}
+	return x509.ParseECPrivateKey(block.Bytes)
+}
+
+// LoadOrGenerateKey 加载已有密钥或生成新密钥
+func LoadOrGenerateKey(path string) (*ecdsa.PrivateKey, error) {
+	key, err := LoadPrivateKey(path)
+	if err == nil {
+		return key, nil
+	}
+	key, err = GenerateKey()
+	if err != nil {
+		return nil, err
+	}
+	if err := SavePrivateKey(key, path); err != nil {
+		return nil, err
+	}
+	return key, nil
 }

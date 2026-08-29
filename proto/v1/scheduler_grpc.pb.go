@@ -552,6 +552,80 @@ func (x *schedulerReportUnitStatusServer) Recv() (*UnitStatusReport, error) {
 	return m, nil
 }
 
+// ========== SyncService (WAL 热备同步) ==========
+
+// SyncServiceServer 是 WAL 同步服务的接口定义
+type SyncServiceServer interface {
+	SyncWAL(req *SyncWALRequest, stream SyncService_SyncWALServer) error
+	HealthCheck(ctx context.Context, req *HealthCheckRequest) (*HealthCheckResponse, error)
+}
+
+// SyncService_SyncWALServer 同步 WAL 流接口
+type SyncService_SyncWALServer interface {
+	Send(*SyncWALResponse) error
+	grpc.ServerStream
+}
+
+// RegisterSyncServiceServer 注册同步服务到 gRPC 服务器
+func RegisterSyncServiceServer(s grpc.ServiceRegistrar, srv SyncServiceServer) {
+	s.RegisterService(&SyncService_ServiceDesc, srv)
+}
+
+// SyncService_ServiceDesc 同步服务的 gRPC 描述
+var SyncService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "computingpower.v1.Sync",
+	HandlerType: (*SyncServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "HealthCheck",
+			Handler:    _SyncService_HealthCheck_Handler,
+		},
+	},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "SyncWAL",
+			Handler:       _SyncService_SyncWAL_Handler,
+			ServerStreams: true,
+		},
+	},
+	Metadata: "scheduler.proto",
+}
+
+func _SyncService_HealthCheck_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := &HealthCheckRequest{}
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SyncServiceServer).HealthCheck(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/computingpower.v1.Sync/HealthCheck",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SyncServiceServer).HealthCheck(ctx, req.(*HealthCheckRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SyncService_SyncWAL_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := &SyncWALRequest{}
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SyncServiceServer).SyncWAL(m, &syncServiceSyncWALServer{stream})
+}
+
+// syncServiceSyncWALServer 实现 SyncService_SyncWALServer
+type syncServiceSyncWALServer struct {
+	grpc.ServerStream
+}
+
+func (x *syncServiceSyncWALServer) Send(m *SyncWALResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
 // ========== Client-side helper functions ==========
 
 // NewSchedulerServiceClient 创建调度器客户端
@@ -806,6 +880,61 @@ func (x *schedulerReportUnitStatusClient) Send(m *UnitStatusReport) error {
 
 func (x *schedulerReportUnitStatusClient) Recv() (*UnitStatusAck, error) {
 	m := &UnitStatusAck{}
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// ========== SyncService Client ==========
+
+// SyncServiceClient 是 WAL 同步服务的客户端接口
+type SyncServiceClient interface {
+	SyncWAL(ctx context.Context, in *SyncWALRequest, opts ...grpc.CallOption) (SyncService_SyncWALClient, error)
+	HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error)
+}
+
+// NewSyncServiceClient 创建同步服务客户端
+func NewSyncServiceClient(cc grpc.ClientConnInterface) SyncServiceClient {
+	return &syncServiceClient{cc}
+}
+
+type syncServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func (c *syncServiceClient) HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error) {
+	out := &HealthCheckResponse{}
+	err := c.cc.Invoke(ctx, "/computingpower.v1.Sync/HealthCheck", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *syncServiceClient) SyncWAL(ctx context.Context, in *SyncWALRequest, opts ...grpc.CallOption) (SyncService_SyncWALClient, error) {
+	stream, err := c.cc.NewStream(ctx, &SyncService_ServiceDesc.Streams[0], "/computingpower.v1.Sync/SyncWAL", opts...)
+	if err != nil {
+		return nil, err
+	}
+	if err := stream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	return &syncServiceSyncWALClient{stream}, nil
+}
+
+// SyncService_SyncWALClient 同步 WAL 流客户端接口
+type SyncService_SyncWALClient interface {
+	Recv() (*SyncWALResponse, error)
+	grpc.ClientStream
+}
+
+type syncServiceSyncWALClient struct {
+	grpc.ClientStream
+}
+
+func (x *syncServiceSyncWALClient) Recv() (*SyncWALResponse, error) {
+	m := &SyncWALResponse{}
 	if err := x.ClientStream.RecvMsg(m); err != nil {
 		return nil, err
 	}

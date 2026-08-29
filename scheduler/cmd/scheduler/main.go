@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 
 	"computing-power/pkg/trustgraph"
 	"computing-power/pkg/version"
+	"computing-power/pkg/wal"
 	"computing-power/scheduler/internal/ca"
 	"computing-power/scheduler/internal/config"
 	"computing-power/scheduler/internal/ipam"
@@ -61,6 +63,11 @@ func run(configPath string) error {
 
 	log.Printf("computing-power scheduler starting: %s", version.Info())
 
+	// 监听信号（提前创建 ctx，WAL 热备需要）
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go handleSignals(cancel)
+
 	// 创建数据目录
 	dataDir := filepath.Dir(cfg.Database.Path)
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
@@ -74,6 +81,43 @@ func run(configPath string) error {
 	}
 	defer st.Close()
 	log.Printf("store opened: %s", cfg.Database.Path)
+
+	// ========== WAL 热备 ==========
+	if cfg.Sync.Enabled {
+		walDir := cfg.Sync.WalDir
+		if err := os.MkdirAll(walDir, 0755); err != nil {
+			return fmt.Errorf("create wal dir: %w", err)
+		}
+		w, err := wal.NewWriter(walDir, cfg.Sync.MaxWalSize)
+		if err != nil {
+			return fmt.Errorf("create wal writer: %w", err)
+		}
+		st.EnableWAL(w)
+		log.Printf("wal enabled: dir=%s role=%s", walDir, cfg.Sync.Role)
+
+		if cfg.Sync.Role == "primary" {
+			// 检查点管理器
+			checkpointInterval := parseDuration(cfg.Sync.CheckpointInterval, 5*time.Minute)
+			cp := server.NewCheckpointer(st, walDir, checkpointInterval)
+			cp.Start(ctx)
+
+			// Sync 服务（独立端口）
+			syncServer := grpc.NewServer(grpc.ForceServerCodecV2(pb.JSONCodec{}))
+			syncSvc := server.NewSyncService(st, walDir, cfg.Scheduler.ID)
+			pb.RegisterSyncServiceServer(syncServer, syncSvc)
+			go func() {
+				syncLis, err := net.Listen("tcp", cfg.Sync.ListenAddr)
+				if err != nil {
+					log.Printf("[main] sync listen on %s: %v", cfg.Sync.ListenAddr, err)
+					return
+				}
+				log.Printf("[main] sync service listening on %s", cfg.Sync.ListenAddr)
+				if err := syncServer.Serve(syncLis); err != nil {
+					log.Printf("[main] sync serve: %v", err)
+				}
+			}()
+		}
+	}
 
 	// 创建节点注册中心
 	reg := registry.NewRegistry(
@@ -107,7 +151,12 @@ func run(configPath string) error {
 	edges, err := st.ListTrustEdges()
 	if err == nil {
 		for _, e := range edges {
-			trust.AddEdge(e.FromNode, e.ToNode, e.Signature, nil)
+			var expiresAt *time.Time
+			if e.ExpiresAt > 0 {
+				t := time.UnixMilli(e.ExpiresAt)
+				expiresAt = &t
+			}
+			trust.AddEdge(e.FromNode, e.ToNode, e.Signature, expiresAt)
 		}
 	}
 
@@ -132,14 +181,44 @@ func run(configPath string) error {
 
 	// 启动调度器服务
 	srv := server.New(st, reg, trust, heartbeatInterval, heartbeatTimeout, cfg, caMgr, ipamMgr)
+
+	// Standby 模式：延迟启动 gRPC server，等待主节点宕机后提升
+	if cfg.Sync.Enabled && cfg.Sync.Role == "standby" {
+		healthCheckInterval := parseDuration(cfg.Sync.HealthCheckInterval, 5*time.Second)
+		failoverTimeout := parseDuration(cfg.Sync.FailoverTimeout, 15*time.Second)
+
+		standby := server.NewStandby(st, cfg.Sync.PrimaryAddr, healthCheckInterval, failoverTimeout)
+		standby.Start(ctx)
+		log.Printf("[main] standby mode: syncing from primary %s", cfg.Sync.PrimaryAddr)
+
+		// 等待提升或退出
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if standby.IsActive() {
+						log.Printf("[main] promoted to active, starting gRPC server on %s", cfg.Server.GRPC.Listen)
+						srv.Register(grpcServer)
+						if err := srv.Start(ctx, cfg.Server.GRPC.Listen, grpcServer); err != nil {
+							log.Printf("[main] server error after promotion: %v", err)
+						}
+						return
+					}
+				}
+			}
+		}()
+
+		<-ctx.Done()
+		standby.Stop()
+		return nil
+	}
+
+	// Primary / 非同步模式：立即启动 gRPC server
 	srv.Register(grpcServer)
-
-	// 监听信号
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go handleSignals(cancel)
-
-	// 启动服务器（阻塞）
 	return srv.Start(ctx, cfg.Server.GRPC.Listen, grpcServer)
 }
 

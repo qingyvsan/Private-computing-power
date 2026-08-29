@@ -31,6 +31,7 @@ import (
 type Server struct {
 	store    *store.Store
 	registry *registry.Registry
+	trust    *trustgraph.Graph
 	eventBus *events.Bus
 	engine   *scheduler.Engine
 	stopCh   chan struct{}
@@ -63,6 +64,7 @@ func New(st *store.Store, reg *registry.Registry, trust *trustgraph.Graph,
 	return &Server{
 		store:             st,
 		registry:          reg,
+		trust:             trust,
 		eventBus:          events.NewBus(),
 		engine:            eng,
 		stopCh:            make(chan struct{}),
@@ -94,6 +96,9 @@ func (s *Server) Start(ctx context.Context, listen string, grpcServer *grpc.Serv
 
 	// 启动调度引擎
 	s.engine.Start(ctx)
+
+	// 启动信任过期清理
+	s.startTrustExpiryLoop(ctx)
 
 	go func() {
 		<-ctx.Done()
@@ -566,12 +571,109 @@ func (s *Server) propagateUnitStatus(unit *pb.Unit) {
 
 // DeclareTrust 声明信任
 func (s *Server) DeclareTrust(ctx context.Context, req *pb.DeclareTrustRequest) (*pb.DeclareTrustResponse, error) {
-	// P7 阶段实现：验证签名、存储信任边
+	if req.FromNodeID == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "from_node_id is required")
+	}
+	if req.TargetNodeID == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "target_node_id is required")
+	}
+	if req.FromNodeID == req.TargetNodeID {
+		return nil, status.Errorf(codes.InvalidArgument, "self-trust is not allowed")
+	}
+
+	// 查找声明节点的公钥
+	node, err := s.store.GetNode(req.FromNodeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "lookup node: %v", err)
+	}
+	if node == nil {
+		return nil, status.Errorf(codes.NotFound, "node %s not found", req.FromNodeID)
+	}
+	if len(node.PublicKey) == 0 {
+		return nil, status.Errorf(codes.FailedPrecondition, "node %s has no public key registered", req.FromNodeID)
+	}
+
+	// 验证签名
+	if len(req.Signature) > 0 {
+		if err := trustgraph.VerifyTrust(node.PublicKey, req.FromNodeID, req.TargetNodeID, req.Signature); err != nil {
+			return nil, status.Errorf(codes.PermissionDenied, "signature verification failed: %v", err)
+		}
+	}
+
+	// 解析过期时间
+	var expiresAt *time.Time
+	if req.ExpiresAt > 0 {
+		t := time.UnixMilli(req.ExpiresAt)
+		expiresAt = &t
+	}
+
+	// 更新内存图
+	if err := s.trust.AddEdge(req.FromNodeID, req.TargetNodeID, req.Signature, expiresAt); err != nil {
+		return nil, status.Errorf(codes.Internal, "add trust edge: %v", err)
+	}
+
+	// 持久化到 BoltDB
+	edge := &pb.TrustEdge{
+		FromNode:  req.FromNodeID,
+		ToNode:    req.TargetNodeID,
+		Signature: req.Signature,
+		CreatedAt: time.Now().UnixMilli(),
+		ExpiresAt: req.ExpiresAt,
+	}
+	if err := s.store.SaveTrustEdge(edge); err != nil {
+		// 持久化失败时回滚内存状态
+		_ = s.trust.RemoveEdge(req.FromNodeID, req.TargetNodeID)
+		return nil, status.Errorf(codes.Internal, "save trust edge: %v", err)
+	}
+
+	log.Printf("trust declared: %s -> %s (expires=%d)", req.FromNodeID, req.TargetNodeID, req.ExpiresAt)
 	return &pb.DeclareTrustResponse{Success: true}, nil
 }
 
 // RevokeTrust 撤销信任
 func (s *Server) RevokeTrust(ctx context.Context, req *pb.RevokeTrustRequest) (*pb.RevokeTrustResponse, error) {
+	if req.FromNodeID == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "from_node_id is required")
+	}
+	if req.TargetNodeID == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "target_node_id is required")
+	}
+
+	// 查找声明节点的公钥
+	node, err := s.store.GetNode(req.FromNodeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "lookup node: %v", err)
+	}
+	if node == nil {
+		return nil, status.Errorf(codes.NotFound, "node %s not found", req.FromNodeID)
+	}
+	if len(node.PublicKey) == 0 {
+		return nil, status.Errorf(codes.FailedPrecondition, "node %s has no public key registered", req.FromNodeID)
+	}
+
+	// 验证签名
+	if len(req.Signature) > 0 {
+		if err := trustgraph.VerifyTrust(node.PublicKey, req.FromNodeID, req.TargetNodeID, req.Signature); err != nil {
+			return nil, status.Errorf(codes.PermissionDenied, "signature verification failed: %v", err)
+		}
+	}
+
+	// 幂等：如果边不存在，直接返回成功
+	if !s.trust.HasTrust(req.FromNodeID, req.TargetNodeID) {
+		return &pb.RevokeTrustResponse{Success: true}, nil
+	}
+
+	// 从内存图中移除
+	s.trust.RemoveEdge(req.FromNodeID, req.TargetNodeID)
+
+	// 从 BoltDB 删除
+	if err := s.store.DeleteTrustEdge(req.FromNodeID, req.TargetNodeID); err != nil {
+		// 删除失败时回滚内存状态
+		_ = s.trust.AddEdge(req.FromNodeID, req.TargetNodeID, nil, nil)
+		return nil, status.Errorf(codes.Internal, "delete trust edge: %v", err)
+	}
+
+	log.Printf("trust revoked: %s -> %s", req.FromNodeID, req.TargetNodeID)
 	return &pb.RevokeTrustResponse{Success: true}, nil
 }
 
@@ -649,12 +751,38 @@ func (s *Server) RedeemInviteCode(ctx context.Context, req *pb.RedeemInviteCodeR
 
 // ========== 节点查询 ==========
 
+// isNodeVisibleTo 检查节点对请求者是否可见
+func (s *Server) isNodeVisibleTo(node *pb.Node, requesterID string) bool {
+	switch node.Discoverable {
+	case "public":
+		return true
+	case "hidden":
+		if requesterID == "" {
+			return false
+		}
+		return s.trust.HasTrust(requesterID, node.ID) || node.ID == requesterID
+	case "trust_only":
+		fallthrough
+	default:
+		if requesterID == "" {
+			return false
+		}
+		return s.trust.IsReachable(requesterID, node.ID, 10) || node.ID == requesterID
+	}
+}
+
 // ListNodes 列出所有节点
 func (s *Server) ListNodes(ctx context.Context, req *pb.ListNodesRequest) (*pb.ListNodesResponse, error) {
 	nodes := s.registry.ListAll()
+	filtered := make([]*pb.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if s.isNodeVisibleTo(n, req.RequesterID) {
+			filtered = append(filtered, n)
+		}
+	}
 	return &pb.ListNodesResponse{
-		Nodes:      nodes,
-		TotalCount: int32(len(nodes)),
+		Nodes:      filtered,
+		TotalCount: int32(len(filtered)),
 	}, nil
 }
 
@@ -664,7 +792,59 @@ func (s *Server) GetNode(ctx context.Context, req *pb.GetNodeRequest) (*pb.GetNo
 	if node == nil {
 		return nil, status.Errorf(codes.NotFound, "node %s not found", req.NodeID)
 	}
+	if !s.isNodeVisibleTo(node, req.RequesterID) {
+		return nil, status.Errorf(codes.NotFound, "node %s not found", req.NodeID)
+	}
 	return &pb.GetNodeResponse{Node: node}, nil
+}
+
+// ========== 信任过期清理 ==========
+
+// startTrustExpiryLoop 启动定期过期边清理
+func (s *Server) startTrustExpiryLoop(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.pruneExpiredTrust()
+			}
+		}
+	}()
+	log.Printf("trust expiry loop started (interval=5m)")
+}
+
+// pruneExpiredTrust 清理过期信任边
+func (s *Server) pruneExpiredTrust() {
+	// 清理内存图
+	count := s.trust.PruneExpired()
+	if count > 0 {
+		log.Printf("trust expiry: pruned %d expired edges from memory", count)
+	}
+
+	// 清理 BoltDB 中的过期边
+	edges, err := s.store.ListTrustEdges()
+	if err != nil {
+		log.Printf("trust expiry: list edges: %v", err)
+		return
+	}
+	now := time.Now()
+	pruned := 0
+	for _, e := range edges {
+		if e.ExpiresAt > 0 && now.After(time.UnixMilli(e.ExpiresAt)) {
+			if err := s.store.DeleteTrustEdge(e.FromNode, e.ToNode); err != nil {
+				log.Printf("trust expiry: delete edge %s->%s: %v", e.FromNode, e.ToNode, err)
+			} else {
+				pruned++
+			}
+		}
+	}
+	if pruned > 0 {
+		log.Printf("trust expiry: pruned %d expired edges from store", pruned)
+	}
 }
 
 // generateNodeID 生成节点 ID

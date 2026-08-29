@@ -124,6 +124,7 @@ type UnitStatusAck struct {
 // ========== 信任管理 ==========
 
 type DeclareTrustRequest struct {
+	FromNodeID   string `json:"from_node_id,omitempty" yaml:"from_node_id,omitempty"`
 	TargetNodeID string `json:"target_node_id,omitempty" yaml:"target_node_id,omitempty"`
 	Signature    []byte `json:"signature,omitempty" yaml:"signature,omitempty"`
 	ExpiresAt    int64  `json:"expires_at,omitempty" yaml:"expires_at,omitempty"`
@@ -134,6 +135,7 @@ type DeclareTrustResponse struct {
 }
 
 type RevokeTrustRequest struct {
+	FromNodeID   string `json:"from_node_id,omitempty" yaml:"from_node_id,omitempty"`
 	TargetNodeID string `json:"target_node_id,omitempty" yaml:"target_node_id,omitempty"`
 	Signature    []byte `json:"signature,omitempty" yaml:"signature,omitempty"`
 }
@@ -216,6 +218,7 @@ type ListNodesRequest struct {
 	StatusFilter NodeStatus `json:"status_filter,omitempty" yaml:"status_filter,omitempty"`
 	PageSize     int32      `json:"page_size,omitempty" yaml:"page_size,omitempty"`
 	PageToken    string     `json:"page_token,omitempty" yaml:"page_token,omitempty"`
+	RequesterID  string     `json:"requester_id,omitempty" yaml:"requester_id,omitempty"`
 }
 
 type ListNodesResponse struct {
@@ -225,9 +228,42 @@ type ListNodesResponse struct {
 }
 
 type GetNodeRequest struct {
-	NodeID string `json:"node_id,omitempty" yaml:"node_id,omitempty"`
+	NodeID      string `json:"node_id,omitempty" yaml:"node_id,omitempty"`
+	RequesterID string `json:"requester_id,omitempty" yaml:"requester_id,omitempty"`
 }
 
 type GetNodeResponse struct {
 	Node *Node `json:"node,omitempty" yaml:"node,omitempty"`
+}
+
+// ========== WAL 同步 ==========
+
+type SyncWALEntry struct {
+	Sequence   uint64 `json:"sequence,omitempty" yaml:"sequence,omitempty"`
+	Type       uint32 `json:"type,omitempty" yaml:"type,omitempty"`
+	Key        string `json:"key,omitempty" yaml:"key,omitempty"`
+	Data       []byte `json:"data,omitempty" yaml:"data,omitempty"`
+	Compressed bool   `json:"compressed,omitempty" yaml:"compressed,omitempty"`
+}
+
+type SyncWALRequest struct {
+	LastSequence uint64 `json:"last_sequence,omitempty" yaml:"last_sequence,omitempty"`
+	StandbyID    string `json:"standby_id,omitempty" yaml:"standby_id,omitempty"`
+}
+
+type SyncWALResponse struct {
+	Entries    []*SyncWALEntry `json:"entries,omitempty" yaml:"entries,omitempty"`
+	More       bool            `json:"more,omitempty" yaml:"more,omitempty"`
+	Compressed bool            `json:"compressed,omitempty" yaml:"compressed,omitempty"`
+}
+
+type HealthCheckRequest struct {
+	Timestamp int64 `json:"timestamp,omitempty" yaml:"timestamp,omitempty"`
+}
+
+type HealthCheckResponse struct {
+	Timestamp int64  `json:"timestamp,omitempty" yaml:"timestamp,omitempty"`
+	Role      string `json:"role,omitempty" yaml:"role,omitempty"`
+	Sequence  uint64 `json:"sequence,omitempty" yaml:"sequence,omitempty"`
+	LeaderID  string `json:"leader_id,omitempty" yaml:"leader_id,omitempty"`
 }

@@ -7,4 +7,6 @@ require (
 	google.golang.org/protobuf v1.36.4
 )
 
+require github.com/klauspost/compress v1.19.2 // indirect
+
 replace computing-power/proto => ../proto

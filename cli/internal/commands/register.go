@@ -11,6 +11,7 @@ import (
 	pb "computing-power/proto/v1"
 
 	"computing-power/cli/internal/client"
+	"computing-power/pkg/trustgraph"
 )
 
 // registerCmd 注册节点
@@ -27,8 +28,20 @@ var registerCmd = &cobra.Command{
 		inviteCode, _ := cmd.Flags().GetString("invite")
 		fingerprint := getHostFingerprint()
 
+		// 生成或加载 ECDSA 密钥对
+		keyPath := filepath.Join(getCpDir(), "keys", "ecdsa.pem")
+		key, err := trustgraph.LoadOrGenerateKey(keyPath)
+		if err != nil {
+			return fmt.Errorf("key setup: %w", err)
+		}
+		pubKeyPEM, err := trustgraph.MarshalPublicKey(&key.PublicKey)
+		if err != nil {
+			return fmt.Errorf("marshal public key: %w", err)
+		}
+
 		req := &pb.RegisterNodeRequest{
 			Name:               name,
+			PublicKey:          pubKeyPEM,
 			InviteCode:         inviteCode,
 			HardwareFingerprint: fingerprint,
 		}
@@ -90,6 +103,15 @@ func getHostFingerprint() string {
 		return "unknown"
 	}
 	return hostname
+}
+
+// getCpDir 返回 .cp 配置目录
+func getCpDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), ".cp")
+	}
+	return filepath.Join(home, ".cp")
 }
 
 func init() {

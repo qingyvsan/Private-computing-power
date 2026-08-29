@@ -77,6 +77,20 @@ type Config struct {
 		MaxUsesPerCode int    `yaml:"max_uses_per_code"`
 	} `yaml:"invitation"`
 
+	Sync struct {
+		Enabled             bool   `yaml:"enabled"`
+		Role                string `yaml:"role"`
+		ListenAddr          string `yaml:"listen_addr"`
+		PrimaryAddr         string `yaml:"primary_addr"`
+		WalDir              string `yaml:"wal_dir"`
+		MaxWalSize          int64  `yaml:"max_wal_size"`
+		CheckpointInterval  string `yaml:"checkpoint_interval"`
+		SyncBandwidthMbps   int    `yaml:"sync_bandwidth_mbps"`
+		Compression         string `yaml:"compression"`
+		HealthCheckInterval string `yaml:"health_check_interval"`
+		FailoverTimeout     string `yaml:"failover_timeout"`
+	} `yaml:"sync"`
+
 	Logging struct {
 		Level  string `yaml:"level"`
 		Format string `yaml:"format"`
@@ -125,6 +139,19 @@ func Default() *Config {
 	c.Invitation.CodeLength = 32
 	c.Invitation.CodeExpiry = "72h"
 	c.Invitation.MaxUsesPerCode = 1
+
+	c.Sync.Enabled = false
+	c.Sync.Role = "primary"
+	c.Sync.ListenAddr = "0.0.0.0:9091"
+	c.Sync.PrimaryAddr = "8.138.108.183:9091"
+	c.Sync.WalDir = "./data/wal"
+	c.Sync.MaxWalSize = 100 * 1024 * 1024 // 100MB
+	c.Sync.CheckpointInterval = "5m"
+	c.Sync.SyncBandwidthMbps = 100
+	c.Sync.Compression = "zstd"
+	c.Sync.HealthCheckInterval = "5s"
+	c.Sync.FailoverTimeout = "15s"
+
 	c.Logging.Level = "info"
 	c.Logging.Format = "json"
 	c.Logging.Output = "stdout"

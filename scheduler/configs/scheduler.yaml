@@ -58,6 +58,19 @@ invitation:
   code_expiry: "72h"
   max_uses_per_code: 1
 
+sync:
+  enabled: false
+  role: "primary"
+  listen_addr: "0.0.0.0:9091"
+  primary_addr: "8.138.108.183:9091"
+  wal_dir: "./data/wal"
+  max_wal_size: 104857600  # 100MB
+  checkpoint_interval: "5m"
+  sync_bandwidth_mbps: 100
+  compression: "zstd"
+  health_check_interval: "5s"
+  failover_timeout: "15s"
+
 logging:
   level: "info"
   format: "json"

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -23,6 +24,7 @@ const (
 type Entry struct {
 	Type      EntryType `json:"type"`
 	Timestamp int64     `json:"timestamp"`
+	Sequence  uint64    `json:"sequence"` // 全局递增序号
 	Key       string    `json:"key"`
 	Data      []byte    `json:"data"`
 	Checksum  uint32    `json:"checksum"`
@@ -35,7 +37,8 @@ type Writer struct {
 	file     *os.File
 	size     int64
 	maxSize  int64 // 超过此大小自动轮转
-	sequence uint64
+	sequence uint64 // 文件序列号（轮转用）
+	entrySeq uint64 // 条目全局递增序号
 }
 
 // NewWriter 创建 WAL 写入器
@@ -54,37 +57,49 @@ func NewWriter(dir string, maxSize int64) (*Writer, error) {
 	return w, nil
 }
 
-// Write 写入一条 WAL 条目
-func (w *Writer) Write(entry Entry) error {
+// Write 写入一条 WAL 条目，返回条目序号
+func (w *Writer) Write(entry Entry) (uint64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if w.size >= w.maxSize {
 		if err := w.rotate(); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
+	w.entrySeq++
 	entry.Timestamp = time.Now().UnixNano()
+	entry.Sequence = w.entrySeq
 	entry.Checksum = crc32(entry.Data)
 
 	data := entry.Marshal()
 	n, err := w.file.Write(data)
 	if err != nil {
-		return fmt.Errorf("write WAL entry: %w", err)
+		return 0, fmt.Errorf("write WAL entry: %w", err)
 	}
 	w.size += int64(n)
-	return nil
+	return entry.Sequence, nil
+}
+
+// LastSequence 返回最后写入的条目序号
+func (w *Writer) LastSequence() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.entrySeq
+}
+
+// Dir 返回 WAL 目录
+func (w *Writer) Dir() string {
+	return w.dir
 }
 
 // rotate 轮转 WAL 文件
 func (w *Writer) rotate() error {
 	if w.file != nil {
 		w.file.Close()
+		w.file = nil
 	}
-	// 重命名当前文件为归档
-	oldPath := filepath.Join(w.dir, fmt.Sprintf("wal-%06d.log", w.sequence))
-	os.Rename(w.file.Name(), oldPath)
 	return w.openNewFile()
 }
 
@@ -111,10 +126,11 @@ func (w *Writer) Close() error {
 }
 
 // Marshal 序列化 WAL 条目
+// 格式: Type(1) + Timestamp(8) + Sequence(8) + KeyLen(2) + Key(keyLen) + DataLen(4) + Data(dataLen) + Checksum(4) + TrailingCRC(4)
 func (e Entry) Marshal() []byte {
 	keyLen := len(e.Key)
 	dataLen := len(e.Data)
-	buf := make([]byte, 1+8+2+keyLen+4+dataLen+4)
+	buf := make([]byte, 1+8+8+2+keyLen+4+dataLen+4+4)
 	offset := 0
 
 	buf[offset] = byte(e.Type)
@@ -123,17 +139,23 @@ func (e Entry) Marshal() []byte {
 	binary.BigEndian.PutUint64(buf[offset:], uint64(e.Timestamp))
 	offset += 8
 
+	binary.BigEndian.PutUint64(buf[offset:], e.Sequence)
+	offset += 8
+
 	binary.BigEndian.PutUint16(buf[offset:], uint16(keyLen))
 	offset += 2
 
 	copy(buf[offset:], e.Key)
 	offset += keyLen
 
-	binary.BigEndian.PutUint32(buf[offset:], e.Checksum)
+	binary.BigEndian.PutUint32(buf[offset:], uint32(dataLen))
 	offset += 4
 
 	copy(buf[offset:], e.Data)
 	offset += dataLen
+
+	binary.BigEndian.PutUint32(buf[offset:], e.Checksum)
+	offset += 4
 
 	binary.BigEndian.PutUint32(buf[offset:], crc32(buf[:offset]))
 	offset += 4
@@ -143,7 +165,7 @@ func (e Entry) Marshal() []byte {
 
 // UnmarshalWAL 反序列化 WAL 条目
 func UnmarshalWAL(data []byte) (*Entry, error) {
-	if len(data) < 1+8+2+4+4 {
+	if len(data) < 1+8+8+2+4+4+4 {
 		return nil, fmt.Errorf("WAL entry too short")
 	}
 
@@ -156,6 +178,9 @@ func UnmarshalWAL(data []byte) (*Entry, error) {
 	e.Timestamp = int64(binary.BigEndian.Uint64(data[offset:]))
 	offset += 8
 
+	e.Sequence = binary.BigEndian.Uint64(data[offset:])
+	offset += 8
+
 	keyLen := int(binary.BigEndian.Uint16(data[offset:]))
 	offset += 2
 
@@ -165,16 +190,19 @@ func UnmarshalWAL(data []byte) (*Entry, error) {
 	e.Key = string(data[offset : offset+keyLen])
 	offset += keyLen
 
-	e.Checksum = binary.BigEndian.Uint32(data[offset:])
+	dataLen := int(binary.BigEndian.Uint32(data[offset:]))
 	offset += 4
 
-	dataLen := len(data) - offset - 4
-	if dataLen < 0 {
+	if offset+dataLen+4 > len(data) {
 		return nil, fmt.Errorf("WAL entry data truncated")
 	}
+
 	e.Data = make([]byte, dataLen)
 	copy(e.Data, data[offset:offset+dataLen])
 	offset += dataLen
+
+	e.Checksum = binary.BigEndian.Uint32(data[offset:])
+	offset += 4
 
 	// 验证校验和
 	storedCRC := binary.BigEndian.Uint32(data[offset:])
@@ -190,8 +218,6 @@ func UnmarshalWAL(data []byte) (*Entry, error) {
 type Reader struct {
 	dir   string
 	files []string
-	pos   int
-	file  *os.File
 }
 
 // NewReader 创建 WAL 读取器
@@ -207,6 +233,9 @@ func NewReader(dir string) (*Reader, error) {
 			files = append(files, filepath.Join(dir, e.Name()))
 		}
 	}
+
+	// 按文件名排序（确保 wal-000001, wal-000002, ... 顺序正确）
+	sort.Strings(files)
 
 	return &Reader{
 		dir:   dir,
@@ -231,18 +260,33 @@ func (r *Reader) ReadAll() ([]*Entry, error) {
 			}
 			entries = append(entries, entry)
 			// 计算实际消耗的字节数
-			entryLen := 1 + 8 + 2 + len(entry.Key) + 4 + len(entry.Data) + 4
+			entryLen := 1 + 8 + 8 + 2 + len(entry.Key) + 4 + len(entry.Data) + 4 + 4
 			offset += entryLen
 		}
 	}
 	return entries, nil
 }
 
+// ReadFrom 读取从指定序列号开始的 WAL 条目
+func (r *Reader) ReadFrom(seq uint64) ([]*Entry, error) {
+	all, err := r.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	if seq == 0 {
+		return all, nil
+	}
+	var result []*Entry
+	for _, e := range all {
+		if e.Sequence >= seq {
+			result = append(result, e)
+		}
+	}
+	return result, nil
+}
+
 // Close 关闭读取器
 func (r *Reader) Close() error {
-	if r.file != nil {
-		return r.file.Close()
-	}
 	return nil
 }
 
@@ -264,8 +308,7 @@ func crc32(data []byte) uint32 {
 
 // SyncClient WAL 同步客户端（用于备节点拉取主节点 WAL）
 type SyncClient struct {
-	reader *Reader
-	dir    string
+	dir string
 }
 
 // NewSyncClient 创建 WAL 同步客户端
@@ -291,8 +334,9 @@ type Checkpointer struct {
 // NewCheckpointer 创建检查点管理器
 func NewCheckpointer(dir string, interval time.Duration) *Checkpointer {
 	return &Checkpointer{
-		dir:      dir,
-		interval: interval,
+		dir:       dir,
+		interval:  interval,
+		lastCheck: time.Now(),
 	}
 }
 
