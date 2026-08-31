@@ -12,10 +12,10 @@ type Candidate struct {
 }
 
 // Filter 执行完整过滤管线：在线 → 资源 → 信任 → 黑名单
-func (e *Engine) Filter(nodes []*pb.Node, spec *pb.ResourceSpec, ownerID string) []*pb.Node {
+func (e *Engine) Filter(nodes []*pb.Node, spec *pb.ResourceSpec, ownerID string, allowSelfAssignment bool) []*pb.Node {
 	nodes = e.filterOnline(nodes)
 	nodes = e.filterResources(nodes, spec)
-	nodes = e.filterTrust(nodes, ownerID)
+	nodes = e.filterTrust(nodes, ownerID, allowSelfAssignment)
 	nodes = e.filterBlocklist(nodes, ownerID)
 	return nodes
 }
@@ -48,13 +48,17 @@ func (e *Engine) filterResources(nodes []*pb.Node, spec *pb.ResourceSpec) []*pb.
 	return result
 }
 
-// filterTrust 保留 owner 信任可达的节点（owner 自身节点始终通过）
-func (e *Engine) filterTrust(nodes []*pb.Node, ownerID string) []*pb.Node {
+// filterTrust 保留 owner 信任可达的节点（owner 自身节点仅在 allowSelfAssignment=true 时通过）
+func (e *Engine) filterTrust(nodes []*pb.Node, ownerID string, allowSelfAssignment bool) []*pb.Node {
 	if ownerID == "" || len(nodes) == 0 {
 		return nodes
 	}
 	result := make([]*pb.Node, 0, len(nodes))
 	for _, n := range nodes {
+		// 默认不把自己的节点分配给自己；allowSelfAssignment=true 时允许
+		if n.ID == ownerID && !allowSelfAssignment {
+			continue
+		}
 		if n.ID == ownerID || e.trust.IsReachable(ownerID, n.ID, 10) {
 			result = append(result, n)
 		}

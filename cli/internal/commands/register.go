@@ -46,7 +46,7 @@ var registerCmd = &cobra.Command{
 			HardwareFingerprint: fingerprint,
 		}
 
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}

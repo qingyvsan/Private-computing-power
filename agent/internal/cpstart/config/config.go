@@ -28,7 +28,24 @@ type Config struct {
 		Port     int  `json:"port" yaml:"port"`
 		AutoOpen bool `json:"auto_open" yaml:"auto_open"`
 	} `json:"console" yaml:"console"`
+	TLS struct {
+		CACert string `json:"ca_cert" yaml:"ca_cert"`
+		Cert   string `json:"cert" yaml:"cert"`
+		Key    string `json:"key" yaml:"key"`
+	} `json:"tls" yaml:"tls"`
 	InviteCode string `json:"invite_code" yaml:"invite_code"`
+
+	Nebula struct {
+		Enabled bool `json:"enabled" yaml:"enabled"`
+	} `json:"nebula" yaml:"nebula"`
+
+	HAMI struct {
+		Enabled bool `json:"enabled" yaml:"enabled"`
+	} `json:"hami" yaml:"hami"`
+
+	Updater struct {
+		Enabled bool `json:"enabled" yaml:"enabled"`
+	} `json:"updater" yaml:"updater"`
 }
 
 // Default 返回默认配置
@@ -88,5 +105,10 @@ func (c *Config) ToAgentConfig() *agentcfg.Config {
 	ac.Scheduler.Address = c.Scheduler.Address
 	ac.Scheduler.InviteCode = c.InviteCode
 	ac.Resources.ReportGPU = c.Resources.ReportGPU
+	ac.Resources.MaxCPUCores = c.Resources.MaxCPUCores
+	ac.Resources.MaxMemoryMB = c.Resources.MaxMemoryMB
+	ac.Nebula.Enabled = c.Nebula.Enabled
+	ac.HAMI.Enabled = c.HAMI.Enabled
+	ac.Updater.Enabled = c.Updater.Enabled
 	return ac
 }

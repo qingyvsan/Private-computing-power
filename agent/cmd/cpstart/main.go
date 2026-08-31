@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"google.golang.org/grpc/credentials"
 
 	"computing-power/pkg/version"
 
@@ -46,7 +50,7 @@ func run() error {
 	}
 
 	// 创建 gRPC 桥接
-	bridge := server.NewBridge(cfg.Scheduler.Address)
+	bridge := server.NewBridge(cfg.Scheduler.Address, buildTLSCreds(cfg))
 	defer bridge.Close()
 
 	// 创建 Agent 运行器
@@ -102,6 +106,46 @@ func run() error {
 
 	log.Printf("cpstart: stopped")
 	return nil
+}
+
+// buildTLSCreds 从 cpstart 配置构建 gRPC TLS 凭证
+func buildTLSCreds(cfg *cpstartcfg.Config) credentials.TransportCredentials {
+	if cfg.TLS.CACert == "" {
+		return nil // 使用不安全连接
+	}
+
+	caPEM, err := os.ReadFile(cfg.TLS.CACert)
+	if err != nil {
+		log.Printf("cpstart: read CA cert: %v (falling back to insecure)", err)
+		return nil
+	}
+
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(caPEM) {
+		log.Printf("cpstart: parse CA cert failed (falling back to insecure)")
+		return nil
+	}
+
+	tlsConfig := &tls.Config{
+		RootCAs:    caPool,
+		MinVersion: tls.VersionTLS12,
+	}
+
+	// 如果存在客户端证书，加载它
+	if cfg.TLS.Cert != "" && cfg.TLS.Key != "" {
+		if _, err := os.Stat(cfg.TLS.Cert); err == nil {
+			if _, err := os.Stat(cfg.TLS.Key); err == nil {
+				clientCert, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
+				if err != nil {
+					log.Printf("cpstart: load client cert: %v (proceeding without)", err)
+				} else {
+					tlsConfig.Certificates = []tls.Certificate{clientCert}
+				}
+			}
+		}
+	}
+
+	return credentials.NewTLS(tlsConfig)
 }
 
 // openBrowser 在默认浏览器中打开 URL

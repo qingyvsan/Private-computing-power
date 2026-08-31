@@ -85,6 +85,9 @@ export interface SettingsConfig {
   node_id: string
   agent_status: string
   data_dir: string
+  nebula_enabled: boolean
+  hami_enabled: boolean
+  updater_enabled: boolean
 }
 
 export interface ResourceSettings {
@@ -93,12 +96,25 @@ export interface ResourceSettings {
   report_gpu: boolean
 }
 
+export interface FeatureSettings {
+  nebula_enabled: boolean
+  hami_enabled: boolean
+  updater_enabled: boolean
+}
+
 export function getSettings(): Promise<SettingsConfig> {
   return request<SettingsConfig>('/settings')
 }
 
 export function updateResourceSettings(settings: ResourceSettings): Promise<any> {
   return request('/settings/resources', {
+    method: 'PUT',
+    body: JSON.stringify(settings),
+  })
+}
+
+export function updateFeatureSettings(settings: FeatureSettings): Promise<any> {
+  return request('/settings/features', {
     method: 'PUT',
     body: JSON.stringify(settings),
   })
@@ -264,4 +280,34 @@ export function startWSL2Setup(): Promise<any> {
 
 export function getWSL2Status(): Promise<WSL2Status> {
   return request<WSL2Status>('/setup/wsl2/status')
+}
+
+// ========== 项目文件 API ==========
+
+export interface ProjectMeta {
+  project_id: string
+  startup_command: string
+  base_image: string
+  file_name: string
+  size: number
+  created_at: number
+}
+
+export function uploadProject(file: File, startupCommand: string, baseImage: string): Promise<ProjectMeta> {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('startup_command', startupCommand)
+  formData.append('base_image', baseImage)
+  return fetch(`${API_BASE}/projects/upload`, {
+    method: 'POST',
+    body: formData,
+  }).then(async (res) => {
+    const body = await res.json()
+    if (body.error) throw new Error(body.error)
+    return body.data as ProjectMeta
+  })
+}
+
+export function getProjectStatus(id: string): Promise<ProjectMeta> {
+  return request<ProjectMeta>(`/projects/${id}/status`)
 }

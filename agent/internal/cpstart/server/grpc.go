@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	pb "computing-power/proto/v1"
@@ -14,14 +15,19 @@ import (
 // Bridge gRPC 连接管理器
 type Bridge struct {
 	addr   string
+	creds  credentials.TransportCredentials
 	conn   *grpc.ClientConn
 	client pb.SchedulerServiceClient
 	mu     sync.RWMutex
 }
 
 // NewBridge 创建 gRPC 桥接
-func NewBridge(addr string) *Bridge {
-	return &Bridge{addr: addr}
+// creds 为传输层凭证，传 nil 则使用不安全连接
+func NewBridge(addr string, creds credentials.TransportCredentials) *Bridge {
+	if creds == nil {
+		creds = insecure.NewCredentials()
+	}
+	return &Bridge{addr: addr, creds: creds}
 }
 
 // connect 建立 gRPC 连接（延迟连接）
@@ -37,7 +43,7 @@ func (b *Bridge) connect() error {
 	defer cancel()
 
 	conn, err := grpc.DialContext(ctx, b.addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(b.creds),
 		grpc.WithDefaultCallOptions(grpc.ForceCodecV2(pb.JSONCodec{})),
 		grpc.WithBlock(),
 	)

@@ -2,12 +2,16 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	pb "computing-power/proto/v1"
 
@@ -19,19 +23,21 @@ import (
 
 // Handler REST API 处理器
 type Handler struct {
-	bridge *Bridge
-	runner *agent.Runner
-	cfg    *cpstartcfg.Config
-	wsl2   *wsl2.Automator
+	bridge    *Bridge
+	runner    *agent.Runner
+	cfg       *cpstartcfg.Config
+	wsl2      *wsl2.Automator
+	startTime time.Time
 }
 
 // NewHandler 创建 REST 处理器
 func NewHandler(bridge *Bridge, runner *agent.Runner, cfg *cpstartcfg.Config) *Handler {
 	return &Handler{
-		bridge: bridge,
-		runner: runner,
-		cfg:    cfg,
-		wsl2:   wsl2.New(),
+		bridge:    bridge,
+		runner:    runner,
+		cfg:       cfg,
+		wsl2:      wsl2.New(),
+		startTime: time.Now(),
 	}
 }
 
@@ -49,6 +55,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// 设置（资源限制等）
 	mux.HandleFunc("GET /api/v1/settings", h.getSettings)
 	mux.HandleFunc("PUT /api/v1/settings/resources", h.updateResources)
+	mux.HandleFunc("PUT /api/v1/settings/features", h.updateFeatures)
 
 	// 集群节点
 	mux.HandleFunc("GET /api/v1/nodes", h.listNodes)
@@ -72,6 +79,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// WSL2 自动配置
 	mux.HandleFunc("POST /api/v1/setup/wsl2/start", h.startWSL2)
 	mux.HandleFunc("GET /api/v1/setup/wsl2/status", h.wsl2Status)
+	mux.HandleFunc("POST /api/v1/projects/upload", h.uploadProject)
+	mux.HandleFunc("GET /api/v1/projects/{id}/download", h.downloadProject)
+	mux.HandleFunc("GET /api/v1/projects/{id}/status", h.projectStatus)
+
 }
 
 // ========== JSON 响应工具 ==========
@@ -217,7 +228,7 @@ func (h *Handler) localStatus(w http.ResponseWriter, r *http.Request) {
 		"agent_name":  h.cfg.Agent.Name,
 		"agent_status": h.runner.Status().String(),
 		"scheduler":   h.cfg.Scheduler.Address,
-		"uptime_ms":   0, // TODO: 跟踪启动时间
+		"uptime_ms":   time.Since(h.startTime).Milliseconds(),
 	})
 }
 
@@ -230,14 +241,17 @@ func (h *Handler) localResources(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]interface{}{
-		"agent_name":     h.cfg.Agent.Name,
-		"scheduler":      h.cfg.Scheduler.Address,
-		"max_cpu_cores":  h.cfg.Resources.MaxCPUCores,
-		"max_memory_mb":  h.cfg.Resources.MaxMemoryMB,
-		"report_gpu":     h.cfg.Resources.ReportGPU,
-		"node_id":        h.runner.NodeID(),
-		"agent_status":   h.runner.Status().String(),
-		"data_dir":       h.cfg.Agent.DataDir,
+		"agent_name":       h.cfg.Agent.Name,
+		"scheduler":        h.cfg.Scheduler.Address,
+		"max_cpu_cores":    h.cfg.Resources.MaxCPUCores,
+		"max_memory_mb":    h.cfg.Resources.MaxMemoryMB,
+		"report_gpu":       h.cfg.Resources.ReportGPU,
+		"node_id":          h.runner.NodeID(),
+		"agent_status":     h.runner.Status().String(),
+		"data_dir":         h.cfg.Agent.DataDir,
+		"nebula_enabled":   h.cfg.Nebula.Enabled,
+		"hami_enabled":     h.cfg.HAMI.Enabled,
+		"updater_enabled":  h.cfg.Updater.Enabled,
 	})
 }
 
@@ -282,6 +296,51 @@ func (h *Handler) updateResources(w http.ResponseWriter, r *http.Request) {
 		"max_cpu_cores":  h.cfg.Resources.MaxCPUCores,
 		"max_memory_mb":  h.cfg.Resources.MaxMemoryMB,
 		"report_gpu":     h.cfg.Resources.ReportGPU,
+	})
+}
+
+
+func (h *Handler) updateFeatures(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	defer r.Body.Close()
+
+	var incoming struct {
+		NebulaEnabled  bool `json:"nebula_enabled"`
+		HAMIEnabled    bool `json:"hami_enabled"`
+		UpdaterEnabled bool `json:"updater_enabled"`
+	}
+	if err := json.Unmarshal(body, &incoming); err != nil {
+		writeError(w, http.StatusBadRequest, "parse request: "+err.Error())
+		return
+	}
+
+	// Always apply all values
+	h.cfg.Nebula.Enabled = incoming.NebulaEnabled
+	h.cfg.HAMI.Enabled = incoming.HAMIEnabled
+	h.cfg.Updater.Enabled = incoming.UpdaterEnabled
+
+	// Save config
+	if err := h.cfg.Save(h.cfg.ConfigPath()); err != nil {
+		writeError(w, http.StatusInternalServerError, "save config: "+err.Error())
+		return
+	}
+
+	// Restart agent to apply new feature toggles
+	h.runner.Stop()
+	if err := h.runner.Start(); err != nil {
+		writeError(w, http.StatusInternalServerError, "start agent: "+err.Error())
+		return
+	}
+
+	writeOK(w, map[string]interface{}{
+		"status":          "updated",
+		"nebula_enabled":  h.cfg.Nebula.Enabled,
+		"hami_enabled":    h.cfg.HAMI.Enabled,
+		"updater_enabled": h.cfg.Updater.Enabled,
 	})
 }
 
@@ -522,3 +581,118 @@ func (h *Handler) startWSL2(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) wsl2Status(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, h.wsl2.Status())
 }
+// ========== 项目文件 ==========
+
+type projectMeta struct {
+	ProjectID      string `json:"project_id,omitempty"`
+	StartupCommand string `json:"startup_command,omitempty"`
+	BaseImage      string `json:"base_image,omitempty"`
+	FileName       string `json:"file_name,omitempty"`
+	Size           int64  `json:"size,omitempty"`
+	CreatedAt      int64  `json:"created_at,omitempty"`
+}
+
+func (h *Handler) uploadProject(w http.ResponseWriter, r *http.Request) {
+	// 限制上传大小 500MB
+	r.Body = http.MaxBytesReader(w, r.Body, 500<<20)
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "parse form: "+err.Error())
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "file required: "+err.Error())
+		return
+	}
+	defer file.Close()
+
+	startupCommand := r.FormValue("startup_command")
+	baseImage := r.FormValue("base_image")
+	if startupCommand == "" {
+		writeError(w, http.StatusBadRequest, "startup_command is required")
+		return
+	}
+	if baseImage == "" {
+		baseImage = "alpine:latest"
+	}
+
+	projectID := fmt.Sprintf("proj-%d", time.Now().UnixNano())
+	projectDir := filepath.Join(h.cfg.Agent.DataDir, "projects", projectID)
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		writeError(w, http.StatusInternalServerError, "create project dir: "+err.Error())
+		return
+	}
+
+	// 保存 zip 文件
+	zipPath := filepath.Join(projectDir, "project.zip")
+	dst, err := os.Create(zipPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create file: "+err.Error())
+		return
+	}
+	defer dst.Close()
+
+	size, err := io.Copy(dst, file)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "save file: "+err.Error())
+		return
+	}
+
+	// 保存元数据
+	meta := projectMeta{
+		ProjectID:      projectID,
+		StartupCommand: startupCommand,
+		BaseImage:      baseImage,
+		FileName:       header.Filename,
+		Size:           size,
+		CreatedAt:      time.Now().UnixMilli(),
+	}
+	metaData, _ := json.Marshal(meta)
+	if err := os.WriteFile(filepath.Join(projectDir, "meta.json"), metaData, 0644); err != nil {
+		writeError(w, http.StatusInternalServerError, "save meta: "+err.Error())
+		return
+	}
+
+	log.Printf("cpstart: project %s uploaded (%s, %d bytes)", projectID, header.Filename, size)
+	writeOK(w, meta)
+}
+
+func (h *Handler) downloadProject(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, "project_id is required")
+		return
+	}
+
+	zipPath := filepath.Join(h.cfg.Agent.DataDir, "projects", projectID, "project.zip")
+	if _, err := os.Stat(zipPath); err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.zip"`, projectID))
+	http.ServeFile(w, r, zipPath)
+}
+
+func (h *Handler) projectStatus(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, "project_id is required")
+		return
+	}
+
+	projectDir := filepath.Join(h.cfg.Agent.DataDir, "projects", projectID)
+	metaPath := filepath.Join(projectDir, "meta.json")
+	metaData, err := os.ReadFile(metaPath)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	var meta projectMeta
+	json.Unmarshal(metaData, &meta)
+	writeOK(w, meta)
+}
+

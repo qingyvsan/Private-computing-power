@@ -12,12 +12,14 @@ type RegisterNodeRequest struct {
 }
 
 type RegisterNodeResponse struct {
-	NodeID            string `json:"node_id,omitempty" yaml:"node_id,omitempty"`
-	OverlayIP         string `json:"overlay_ip,omitempty" yaml:"overlay_ip,omitempty"`
-	NebulaCertificate []byte `json:"nebula_certificate,omitempty" yaml:"nebula_certificate,omitempty"`
-	NebulaPrivateKey  []byte `json:"nebula_private_key,omitempty" yaml:"nebula_private_key,omitempty"`
-	NebulaConfig      string `json:"nebula_config,omitempty" yaml:"nebula_config,omitempty"`
-	CACertificate     []byte `json:"ca_certificate,omitempty" yaml:"ca_certificate,omitempty"`
+	NodeID             string `json:"node_id,omitempty" yaml:"node_id,omitempty"`
+	OverlayIP          string `json:"overlay_ip,omitempty" yaml:"overlay_ip,omitempty"`
+	NebulaCertificate  []byte `json:"nebula_certificate,omitempty" yaml:"nebula_certificate,omitempty"`
+	NebulaPrivateKey   []byte `json:"nebula_private_key,omitempty" yaml:"nebula_private_key,omitempty"`
+	NebulaConfig       string `json:"nebula_config,omitempty" yaml:"nebula_config,omitempty"`
+	CACertificate      []byte `json:"ca_certificate,omitempty" yaml:"ca_certificate,omitempty"`
+	GrpcCertificate    []byte `json:"grpc_certificate,omitempty" yaml:"grpc_certificate,omitempty"`
+	GrpcPrivateKey     []byte `json:"grpc_private_key,omitempty" yaml:"grpc_private_key,omitempty"`
 }
 
 type HeartbeatRequest struct {

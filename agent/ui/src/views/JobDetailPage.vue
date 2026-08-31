@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getJob, cancelJob, type Job, type Stage, type Unit } from '../api/client'
 import { statusType, formatTime, formatDuration } from '../utils/format'
+import { usePolling } from '../utils/usePolling'
 import { ElMessageBox, ElMessage } from 'element-plus'
 
 const route = useRoute()
@@ -11,10 +12,16 @@ const job = ref<Job | null>(null)
 const loading = ref(true)
 const cancelling = ref(false)
 
-onMounted(async () => {
+async function fetchJob() {
   try {
     job.value = await getJob(route.params.id as string)
   } catch {}
+}
+
+usePolling(fetchJob, 5000, false)
+
+onMounted(async () => {
+  await fetchJob()
   loading.value = false
 })
 

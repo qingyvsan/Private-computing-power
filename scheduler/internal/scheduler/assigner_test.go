@@ -183,7 +183,7 @@ func TestBuildAssignCommand(t *testing.T) {
 	unit := &pb.Unit{ID: "unit-1", JobID: "job-1", StageID: "stage-1", Input: "test.txt", Index: 0}
 	job := &pb.Job{Image: "alpine:latest"}
 
-	cmd := buildAssignCommand(unit, job)
+	cmd := buildAssignCommand(unit, job, "")
 	if cmd.Type != "assign" {
 		t.Errorf("expected type assign, got %s", cmd.Type)
 	}
@@ -286,6 +286,7 @@ func TestScheduleJob_Single(t *testing.T) {
 	job := &pb.Job{
 		ID: "job-1", OwnerID: "n1", Status: pb.JobStatusPending, Type: pb.JobTypeSingle,
 		Image: "alpine:latest",
+		AllowSelfAssignment: true,
 		Stages: []*pb.Stage{{ID: "stage-1", Resources: &pb.ResourceSpec{CPUCores: 1, MemoryBytes: 512}}},
 	}
 	st.SaveJob(job)
@@ -334,6 +335,7 @@ func TestScheduleJob_WorkflowReady(t *testing.T) {
 	job := &pb.Job{
 		ID: "job-1", OwnerID: "n1", Status: pb.JobStatusRunning, Type: pb.JobTypeWorkflow,
 		Image: "alpine:latest",
+		AllowSelfAssignment: true,
 		Stages: []*pb.Stage{
 			{ID: "stage-1", Name: "download", Status: pb.StageStatusCompleted, Resources: &pb.ResourceSpec{CPUCores: 1}},
 			{ID: "stage-2", Name: "process", DependsOn: []string{"download"}, Status: pb.StageStatusPending, Resources: &pb.ResourceSpec{CPUCores: 1}},

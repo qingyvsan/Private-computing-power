@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
 	pb "computing-power/proto/v1"
@@ -126,8 +127,26 @@ func run(configPath string) error {
 		cfg.FailureDetection.PhiThreshold,
 	)
 
-	// 创建 gRPC 服务器
-	grpcServer := grpc.NewServer(
+		// 创建 gRPC mTLS CA（从 cfg.TLS.CACert/CAKey 加载或生成）
+	var grpcCA *ca.GRPCCA
+	if cfg.TLS.Enabled {
+		grpcCA, err = ca.NewGRPCCA(
+			cfg.TLS.CACert,
+			cfg.TLS.CAKey,
+			"ComputingPower",
+			365*24*time.Hour,
+		)
+		if err != nil {
+			log.Printf("gRPC CA init: %v (mTLS disabled)", err)
+			grpcCA = nil
+		} else {
+			log.Printf("gRPC mTLS CA initialized from %s, %s", cfg.TLS.CACert, cfg.TLS.CAKey)
+		}
+	}
+
+	// 构建 gRPC 服务器选项
+	var serverOpts []grpc.ServerOption
+	serverOpts = append(serverOpts,
 		grpc.ForceServerCodecV2(pb.JSONCodec{}),
 		grpc.MaxRecvMsgSize(cfg.Server.GRPC.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(cfg.Server.GRPC.MaxSendMsgSize),
@@ -140,7 +159,28 @@ func run(configPath string) error {
 		}),
 	)
 
-	// 解析心跳间隔和超时
+	// 如果 gRPC CA 可用，启用 mTLS
+	if grpcCA != nil {
+		serverCertPEM, serverKeyPEM, err := grpcCA.GenerateServerCert()
+		if err != nil {
+			return fmt.Errorf("generate gRPC server cert: %w", err)
+		}
+		tlsConfig, err := grpcCA.ServerTLSConfig(serverCertPEM, serverKeyPEM)
+		if err != nil {
+			return fmt.Errorf("build gRPC server TLS config: %w", err)
+		}
+		serverOpts = append(serverOpts,
+			grpc.Creds(credentials.NewTLS(tlsConfig)),
+			grpc.UnaryInterceptor(server.UnaryMTLSInterceptor()),
+			grpc.StreamInterceptor(server.StreamMTLSInterceptor()),
+		)
+		log.Printf("gRPC mTLS enabled")
+	}
+
+	// 创建 gRPC 服务器
+	grpcServer := grpc.NewServer(serverOpts...)
+
+// 解析心跳间隔和超时
 	heartbeatInterval := parseDuration(cfg.FailureDetection.HeartbeatInterval, 3*time.Second)
 	heartbeatTimeout := parseDuration(cfg.FailureDetection.HeartbeatTimeout, 30*time.Second)
 
@@ -180,7 +220,7 @@ func run(configPath string) error {
 	}
 
 	// 启动调度器服务
-	srv := server.New(st, reg, trust, heartbeatInterval, heartbeatTimeout, cfg, caMgr, ipamMgr)
+	srv := server.New(st, reg, trust, heartbeatInterval, heartbeatTimeout, cfg, caMgr, ipamMgr, grpcCA)
 
 	// Standby 模式：延迟启动 gRPC server，等待主节点宕机后提升
 	if cfg.Sync.Enabled && cfg.Sync.Role == "standby" {

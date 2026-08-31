@@ -268,20 +268,24 @@ type Stage struct {
 }
 
 type Job struct {
-	ID            string      `json:"id,omitempty" yaml:"id,omitempty"`
-	Name          string      `json:"name,omitempty" yaml:"name,omitempty"`
-	Type          JobType     `json:"type,omitempty" yaml:"type,omitempty"`
-	OwnerID       string      `json:"owner_id,omitempty" yaml:"owner_id,omitempty"`
-	Image         string      `json:"image,omitempty" yaml:"image,omitempty"`
-	Resources     *ResourceSpec `json:"resources,omitempty" yaml:"resources,omitempty"`
-	Stages        []*Stage    `json:"stages,omitempty" yaml:"stages,omitempty"`
-	Status        JobStatus   `json:"status,omitempty" yaml:"status,omitempty"`
-	FailurePolicy string      `json:"failure_policy,omitempty" yaml:"failure_policy,omitempty"`
-	MaxRetries    int32       `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
-	MaxDurationMs int64       `json:"max_duration_ms,omitempty" yaml:"max_duration_ms,omitempty"`
-	CreatedAt     int64       `json:"created_at,omitempty" yaml:"created_at,omitempty"`
-	UpdatedAt     int64       `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
-	CompletedAt   int64       `json:"completed_at,omitempty" yaml:"completed_at,omitempty"`
+	ID                 string        `json:"id,omitempty" yaml:"id,omitempty"`
+	Name               string        `json:"name,omitempty" yaml:"name,omitempty"`
+	Type               JobType       `json:"type,omitempty" yaml:"type,omitempty"`
+	OwnerID            string        `json:"owner_id,omitempty" yaml:"owner_id,omitempty"`
+	Image              string        `json:"image,omitempty" yaml:"image,omitempty"`
+	Resources          *ResourceSpec `json:"resources,omitempty" yaml:"resources,omitempty"`
+	Stages             []*Stage      `json:"stages,omitempty" yaml:"stages,omitempty"`
+	Status             JobStatus     `json:"status,omitempty" yaml:"status,omitempty"`
+	FailurePolicy      string        `json:"failure_policy,omitempty" yaml:"failure_policy,omitempty"`
+	MaxRetries         int32         `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
+	MaxDurationMs      int64         `json:"max_duration_ms,omitempty" yaml:"max_duration_ms,omitempty"`
+	CreatedAt          int64         `json:"created_at,omitempty" yaml:"created_at,omitempty"`
+	UpdatedAt          int64         `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
+	CompletedAt        int64         `json:"completed_at,omitempty" yaml:"completed_at,omitempty"`
+	AllowSelfAssignment bool         `json:"allow_self_assignment,omitempty" yaml:"allow_self_assignment,omitempty"`
+	ProjectID          string        `json:"project_id,omitempty" yaml:"project_id,omitempty"`
+	StartupCommand     string        `json:"startup_command,omitempty" yaml:"startup_command,omitempty"`
+	BaseImage          string        `json:"base_image,omitempty" yaml:"base_image,omitempty"`
 }
 
 // ========== 信任图 ==========

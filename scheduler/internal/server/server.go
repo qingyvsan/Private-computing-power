@@ -40,6 +40,7 @@ type Server struct {
 	ca       *ca.Manager
 	ipam     *ipam.IPAM
 	cfg      *config.Config
+	grpcCA   *ca.GRPCCA
 
 	heartbeatInterval time.Duration
 }
@@ -47,7 +48,7 @@ type Server struct {
 // New 创建调度器服务器
 func New(st *store.Store, reg *registry.Registry, trust *trustgraph.Graph,
 	heartbeatInterval, heartbeatTimeout time.Duration, cfg *config.Config,
-	caMgr *ca.Manager, ipamMgr *ipam.IPAM) *Server {
+	caMgr *ca.Manager, ipamMgr *ipam.IPAM, grpcCA *ca.GRPCCA) *Server {
 	reg.SetHeartbeatTimeout(heartbeatTimeout)
 
 	// 创建调度引擎
@@ -74,6 +75,7 @@ func New(st *store.Store, reg *registry.Registry, trust *trustgraph.Graph,
 		ca:                caMgr,
 		ipam:              ipamMgr,
 		cfg:               cfg,
+		grpcCA:            grpcCA,
 		heartbeatInterval: heartbeatInterval,
 	}
 }
@@ -162,6 +164,21 @@ func (s *Server) RegisterNode(ctx context.Context, req *pb.RegisterNodeRequest) 
 		}
 	}
 
+	// 签发 gRPC mTLS 客户端证书（如果 gRPC CA 可用）
+	var grpcCert, grpcKey []byte
+	if s.grpcCA != nil && s.grpcCA.IsCAValid() {
+		cert, key, err := s.grpcCA.IssueClientCert(nodeID)
+		if err == nil {
+			grpcCert = cert
+			grpcKey = key
+			if len(caCert) == 0 {
+				caCert = s.grpcCA.CACertPEM()
+			}
+		} else {
+			log.Printf("issue gRPC client cert for %s: %v", nodeID, err)
+		}
+	}
+
 	node := &pb.Node{
 		ID:                  nodeID,
 		Name:                req.Name,
@@ -190,6 +207,8 @@ func (s *Server) RegisterNode(ctx context.Context, req *pb.RegisterNodeRequest) 
 		NebulaPrivateKey:   nebulaKey,
 		NebulaConfig:       nebulaConfig,
 		CACertificate:      caCert,
+		GrpcCertificate:    grpcCert,
+		GrpcPrivateKey:     grpcKey,
 	}, nil
 }
 
@@ -258,6 +277,11 @@ func (s *Server) SubmitJob(ctx context.Context, req *pb.SubmitJobRequest) (*pb.S
 	}
 	job.UpdatedAt = now
 	job.Status = pb.JobStatusPending
+	// 默认不把作业分配给自己
+	if !job.AllowSelfAssignment {
+		job.AllowSelfAssignment = false
+	}
+
 
 	// 为 Job 的每个 Stage 生成 ID
 	for i, stage := range job.Stages {

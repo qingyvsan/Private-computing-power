@@ -24,7 +24,7 @@ var inviteCreateCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		nodeID, _ := cmd.Flags().GetString("node")
 
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}
@@ -51,7 +51,7 @@ var inviteRedeemCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		nodeID, _ := cmd.Flags().GetString("node")
 
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { getLocalStatus, getSettings, updateResourceSettings, type LocalStatus, type SettingsConfig } from '../api/client'
+import { getLocalStatus, getSettings, updateResourceSettings, updateFeatureSettings, type LocalStatus, type SettingsConfig } from '../api/client'
 import { ElMessageBox, ElMessage } from 'element-plus'
 
 const router = useRouter()
@@ -14,6 +14,10 @@ const saving = ref(false)
 const maxCpu = ref(0)
 const maxMem = ref(0)
 const reportGpu = ref(true)
+const nebulaEnabled = ref(false)
+const hamiEnabled = ref(false)
+const updaterEnabled = ref(false)
+const savingFeatures = ref(false)
 
 onMounted(async () => {
   try {
@@ -22,6 +26,9 @@ onMounted(async () => {
     maxCpu.value = settings.value.max_cpu_cores
     maxMem.value = settings.value.max_memory_mb
     reportGpu.value = settings.value.report_gpu
+    nebulaEnabled.value = settings.value.nebula_enabled ?? false
+    hamiEnabled.value = settings.value.hami_enabled ?? false
+    updaterEnabled.value = settings.value.updater_enabled ?? false
   } catch {}
   loading.value = false
 })
@@ -42,6 +49,27 @@ async function handleSaveResources() {
     ElMessage.error('保存失败: ' + (e.message || '未知错误'))
   } finally {
     saving.value = false
+  }
+}
+
+async function handleSaveFeatures() {
+  savingFeatures.value = true
+  try {
+    await updateFeatureSettings({
+      nebula_enabled: nebulaEnabled.value,
+      hami_enabled: hamiEnabled.value,
+      updater_enabled: updaterEnabled.value,
+    })
+    ElMessage.success('功能开关已更新，Agent 已重启')
+    localStatus.value = await getLocalStatus()
+    settings.value = await getSettings()
+    nebulaEnabled.value = settings.value.nebula_enabled ?? false
+    hamiEnabled.value = settings.value.hami_enabled ?? false
+    updaterEnabled.value = settings.value.updater_enabled ?? false
+  } catch (e: any) {
+    ElMessage.error('保存失败: ' + (e.message || '未知错误'))
+  } finally {
+    savingFeatures.value = false
   }
 }
 
@@ -120,6 +148,40 @@ function handleCopy(text: string) {
       </el-form>
       <p style="color: #909399; font-size: 13px; margin: 0;">
         设置为 0 表示共享全部可用资源。修改后 Agent 将自动重启使配置生效。
+      </p>
+    </el-card>
+
+    <el-card style="margin-bottom: 16px;">
+      <template #header>
+        <span>功能开关</span>
+      </template>
+      <el-form label-width="160px" style="max-width: 600px;">
+        <el-form-item label="Nebula 覆盖网络">
+          <el-switch v-model="nebulaEnabled" />
+          <span style="margin-left: 12px; font-size: 13px; color: #909399;">
+            Nebula 覆盖网络，用于节点间安全通信（NAT 穿透）
+          </span>
+        </el-form-item>
+        <el-form-item label="HAMI GPU 虚拟化">
+          <el-switch v-model="hamiEnabled" />
+          <span style="margin-left: 12px; font-size: 13px; color: #909399;">
+            HAMI GPU 虚拟化，支持 GPU 资源分割与共享
+          </span>
+        </el-form-item>
+        <el-form-item label="自动更新">
+          <el-switch v-model="updaterEnabled" />
+          <span style="margin-left: 12px; font-size: 13px; color: #909399;">
+            自动更新 Agent 到最新版本
+          </span>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="savingFeatures" @click="handleSaveFeatures">
+            {{ savingFeatures ? '保存中...' : '保存功能开关' }}
+          </el-button>
+        </el-form-item>
+      </el-form>
+      <p style="color: #909399; font-size: 13px; margin: 0;">
+        修改后 Agent 将自动重启使配置生效。
       </p>
     </el-card>
 

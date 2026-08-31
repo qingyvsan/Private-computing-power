@@ -1,10 +1,12 @@
 package container
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	containerd "github.com/containerd/containerd"
@@ -14,11 +16,25 @@ import (
 	"github.com/containerd/errdefs"
 )
 
+// containerLogs 保存容器的 stdout/stderr 输出
+type containerLogs struct {
+	stdout bytes.Buffer
+	stderr bytes.Buffer
+	mu     sync.Mutex
+}
+
+func (cl *containerLogs) Write(p []byte) (int, error) {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	return cl.stdout.Write(p)
+}
+
 // containerdRuntime 基于 containerd 的容器运行时实现
 type containerdRuntime struct {
 	client    *containerd.Client
 	socket    string
 	namespace string
+	logs      sync.Map // map[string]*containerLogs
 }
 
 // NewRuntime 创建容器运行时
@@ -147,7 +163,10 @@ func (r *containerdRuntime) StartContainer(ctx context.Context, id string) error
 		return fmt.Errorf("load container %s: %w", id, err)
 	}
 
-	task, err := container.NewTask(ctx, cio.NewCreator(cio.WithStdio))
+	// 创建带日志捕获的 IO
+	logs := &containerLogs{}
+	r.logs.Store(id, logs)
+	task, err := container.NewTask(ctx, cio.NewCreator(cio.WithStreams(nil, logs, logs)))
 	if err != nil {
 		return fmt.Errorf("create task for %s: %w", id, err)
 	}
@@ -260,6 +279,9 @@ func (r *containerdRuntime) RemoveContainer(ctx context.Context, id string) erro
 		return fmt.Errorf("delete container %s: %w", id, err)
 	}
 
+	// æ¸çæ¥å¿ç¼å²åº
+	r.logs.Delete(id)
+
 	log.Printf("container removed: %s", id)
 	return nil
 }
@@ -300,6 +322,20 @@ func (r *containerdRuntime) GetStatus(ctx context.Context, id string) (*Containe
 	}
 
 	return cs, nil
+}
+
+// GetContainerLogs 返回容器 stdout 日志
+func (r *containerdRuntime) GetContainerLogs(ctx context.Context, id string) ([]byte, error) {
+	if val, ok := r.logs.Load(id); ok {
+		cl := val.(*containerLogs)
+		cl.mu.Lock()
+		defer cl.mu.Unlock()
+		// 返回 stdout 的副本
+		buf := make([]byte, cl.stdout.Len())
+		copy(buf, cl.stdout.Bytes())
+		return buf, nil
+	}
+	return nil, nil
 }
 
 // envMapToSlice 将 map 转换为 ["KEY=VALUE", ...] 格式

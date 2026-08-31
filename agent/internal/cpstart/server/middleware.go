@@ -7,9 +7,14 @@ import (
 	"strings"
 )
 
-// localhostMiddleware 只允许本地回环地址访问
+// localhostMiddleware 只允许本地回环地址访问（项目下载 API 除外）
 func localhostMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 项目下载 API 允许跨节点访问
+		if strings.HasPrefix(r.URL.Path, "/api/v1/projects/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
 			host = r.RemoteAddr

@@ -26,11 +26,18 @@ var (
 	schedulerAddr string
 	// outputFormat 输出格式
 	outputFormat string
+	// TLS 配置
+	tlsCert string
+	tlsKey  string
+	caCert  string
 )
 
 func init() {
 	RootCmd.PersistentFlags().StringVarP(&schedulerAddr, "scheduler", "s", "8.138.108.183:9090", "调度器 gRPC 地址")
 	RootCmd.PersistentFlags().StringVarP(&outputFormat, "format", "f", "table", "输出格式: table | json")
+	RootCmd.PersistentFlags().StringVar(&tlsCert, "tls-cert", "", "gRPC mTLS 客户端证书路径")
+	RootCmd.PersistentFlags().StringVar(&tlsKey, "tls-key", "", "gRPC mTLS 客户端私钥路径")
+	RootCmd.PersistentFlags().StringVar(&caCert, "ca-cert", "", "gRPC CA 证书路径")
 
 	// 注册子命令
 	RootCmd.AddCommand(

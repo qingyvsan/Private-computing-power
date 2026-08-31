@@ -39,7 +39,7 @@ func newTestServerWithConfig(t *testing.T, cfg *config.Config) *Server {
 	if err != nil {
 		t.Fatalf("ipam: %v", err)
 	}
-	srv := New(st, reg, trustgraph.NewGraph(), 3*time.Second, 30*time.Second, cfg, nil, ipamMgr)
+	srv := New(st, reg, trustgraph.NewGraph(), 3*time.Second, 30*time.Second, cfg, nil, ipamMgr, nil)
 	return srv
 }
 

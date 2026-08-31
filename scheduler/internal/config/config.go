@@ -27,6 +27,7 @@ type Config struct {
 	} `yaml:"server"`
 
 	TLS struct {
+		Enabled    bool   `yaml:"enabled"`
 		CACert     string `yaml:"ca_cert"`
 		CAKey      string `yaml:"ca_key"`
 		ServerCert string `yaml:"server_cert"`
@@ -109,6 +110,7 @@ func Default() *Config {
 	c.Server.GRPC.MaxSendMsgSize = 16777216
 	c.Server.HTTP.Listen = "0.0.0.0:8080"
 	c.Server.HTTP.Enabled = false
+	c.TLS.Enabled = true
 	c.TLS.CACert = "configs/ca.pem"
 	c.TLS.CAKey = "configs/ca-key.pem"
 	c.Database.Engine = "boltdb"

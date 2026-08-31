@@ -2,19 +2,26 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getLocalStatus, listNodes, listJobs, type LocalStatus, type Node, type Job } from '../api/client'
+import { usePolling } from '../utils/usePolling'
 
 const router = useRouter()
 const localStatus = ref<LocalStatus | null>(null)
 const nodes = ref<Node[]>([])
 const jobs = ref<Job[]>([])
 
-onMounted(async () => {
+async function fetchData() {
   try {
     localStatus.value = await getLocalStatus()
     nodes.value = await listNodes()
     const resp = await listJobs()
     jobs.value = resp.jobs.slice(0, 5)
   } catch {}
+}
+
+usePolling(fetchData, 5000)
+
+onMounted(() => {
+  fetchData()
 })
 
 const onlineCount = ref(0)

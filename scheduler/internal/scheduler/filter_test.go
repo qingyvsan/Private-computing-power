@@ -136,7 +136,7 @@ func TestFilterResources_NilNodeResources(t *testing.T) {
 func TestFilterTrust_SelfOwner(t *testing.T) {
 	eng, _ := newTestEngine(t)
 	nodes := []*pb.Node{makeNode("n1", pb.NodeStatusOnline, 0.3)}
-	result := eng.filterTrust(nodes, "n1")
+	result := eng.filterTrust(nodes, "n1", true)
 	if len(result) != 1 {
 		t.Errorf("expected 1 node (self), got %d", len(result))
 	}
@@ -149,7 +149,7 @@ func TestFilterTrust_NotReachable(t *testing.T) {
 		makeNode("n2", pb.NodeStatusOnline, 0.3),
 	}
 	// owner=n1, n2 不可达（信任图为空）
-	result := eng.filterTrust(nodes, "n1")
+	result := eng.filterTrust(nodes, "n1", true)
 	if len(result) != 1 {
 		t.Errorf("expected 1 node (self only), got %d", len(result))
 	}
@@ -163,7 +163,7 @@ func TestFilterTrust_Reachable(t *testing.T) {
 		makeNode("n1", pb.NodeStatusOnline, 0.3),
 		makeNode("n2", pb.NodeStatusOnline, 0.3),
 	}
-	result := eng.filterTrust(nodes, "owner")
+	result := eng.filterTrust(nodes, "owner", true)
 	if len(result) != 2 {
 		t.Errorf("expected 2 nodes (self + n1), got %d", len(result))
 	}
@@ -172,7 +172,7 @@ func TestFilterTrust_Reachable(t *testing.T) {
 func TestFilterTrust_EmptyOwner(t *testing.T) {
 	eng, _ := newTestEngine(t)
 	nodes := []*pb.Node{makeNode("n1", pb.NodeStatusOnline, 0.3)}
-	result := eng.filterTrust(nodes, "")
+	result := eng.filterTrust(nodes, "", true)
 	if len(result) != 1 {
 		t.Errorf("expected 1 node, got %d", len(result))
 	}
@@ -219,7 +219,7 @@ func TestFilterPipeline_Integration(t *testing.T) {
 		makeNode("n4", pb.NodeStatusOnline, 0.3),
 	}
 	spec := &pb.ResourceSpec{CPUCores: 1, MemoryBytes: 512}
-	result := eng.Filter(nodes, spec, "owner")
+	result := eng.Filter(nodes, spec, "owner", true)
 	// owner 自调度 + n2 信任可达
 	if len(result) != 2 {
 		t.Errorf("expected 2 nodes, got %d", len(result))

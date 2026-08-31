@@ -57,10 +57,12 @@ type Config struct {
 	} `yaml:"hami"`
 
 	Resources struct {
-		CollectInterval     string `yaml:"collect_interval"`
-		ReportGPU           bool   `yaml:"report_gpu"`
-		ReportNetwork       bool   `yaml:"report_network"`
-		NetworkProbeInterval string `yaml:"network_probe_interval"`
+		CollectInterval      string  `yaml:"collect_interval"`
+		ReportGPU           bool    `yaml:"report_gpu"`
+		ReportNetwork       bool    `yaml:"report_network"`
+		NetworkProbeInterval string  `yaml:"network_probe_interval"`
+		MaxCPUCores         float64 `yaml:"max_cpu_cores"`
+		MaxMemoryMB         int64   `yaml:"max_memory_mb"`
 	} `yaml:"resources"`
 
 	Nebula struct {

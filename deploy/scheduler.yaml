@@ -10,6 +10,7 @@ server:
     max_send_msg_size: 16777216
 
 tls:
+  enabled: true
   ca_cert: "/opt/cp-scheduler/configs/ca.pem"
   ca_key: "/opt/cp-scheduler/configs/ca-key.pem"
 

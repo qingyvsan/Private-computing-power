@@ -29,7 +29,7 @@ var trustListCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fromNodeID, _ := cmd.Flags().GetString("from")
 
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}
@@ -87,7 +87,7 @@ var trustAddCmd = &cobra.Command{
 			expiresAt = time.Now().Add(expiresIn).UnixMilli()
 		}
 
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}
@@ -134,7 +134,7 @@ var trustRemoveCmd = &cobra.Command{
 			return fmt.Errorf("sign trust revocation: %w", err)
 		}
 
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}

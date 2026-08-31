@@ -1,9 +1,16 @@
 package executor
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -11,21 +18,48 @@ import (
 	"computing-power/agent/internal/container"
 )
 
+// GPURequest 描述 GPU 分配请求
+type GPURequest struct {
+	MemoryMB int64 `json:"memory_mb"`
+	Cores    int32 `json:"cores"`
+	Count    int32 `json:"count"`
+}
+
+// AssignPayload 解析 "assign" 命令的负载
+type AssignPayload struct {
+	UnitID            string      `json:"unit_id"`
+	StageID           string      `json:"stage_id"`
+	JobID             string      `json:"job_id"`
+	Image             string      `json:"image"`
+	Input             string      `json:"input"`
+	Index             int         `json:"index"`
+	GPURequest        *GPURequest `json:"gpu_request,omitempty"`
+	ProjectID         string      `json:"project_id,omitempty"`
+	StartupCommand    string      `json:"startup_command,omitempty"`
+	ProjectNodeID     string      `json:"project_node_id,omitempty"`
+	BaseImage         string      `json:"base_image,omitempty"`
+	ProjectDownloadURL string     `json:"project_download_url,omitempty"`
+}
+
 // Executor 处理调度器下发的命令并编排容器生命周期
 type Executor struct {
-	runtime  container.Runtime
-	manager  *Manager
-	reporter *Reporter
-	hamiMgr  *container.HAMiManager
+	runtime      container.Runtime
+	manager      *Manager
+	reporter     *Reporter
+	hamiMgr      *container.HAMiManager
+	maxCPUCores  float64
+	maxMemoryMB  int64
 }
 
 // NewExecutor 创建执行器
-func NewExecutor(rt container.Runtime, mgr *Manager, rep *Reporter, hamiMgr *container.HAMiManager) *Executor {
+func NewExecutor(rt container.Runtime, mgr *Manager, rep *Reporter, hamiMgr *container.HAMiManager, maxCPUCores float64, maxMemoryMB int64) *Executor {
 	return &Executor{
-		runtime:  rt,
-		manager:  mgr,
-		reporter: rep,
-		hamiMgr:  hamiMgr,
+		runtime:     rt,
+		manager:     mgr,
+		reporter:    rep,
+		hamiMgr:     hamiMgr,
+		maxCPUCores: maxCPUCores,
+		maxMemoryMB: maxMemoryMB,
 	}
 }
 
@@ -72,23 +106,36 @@ func (e *Executor) executeUnit(ap AssignPayload) {
 		log.Printf("executor: report running for unit %s: %v", ap.UnitID, err)
 	}
 
-	// 2. 拉取镜像
 	ctx := context.Background()
-	if err := e.runtime.PullImage(ctx, ap.Image); err != nil {
+
+	// 2. 处理项目下载（如果存在项目）
+	projectDir := ""
+	if ap.ProjectID != "" {
+		projectDir, _ = e.downloadProject(ctx, ap)
+	}
+
+	// 3. 确定使用的镜像
+	image := ap.Image
+	if ap.ProjectID != "" && ap.BaseImage != "" {
+		image = ap.BaseImage
+	}
+
+	// 4. 拉取镜像
+	if err := e.runtime.PullImage(ctx, image); err != nil {
 		log.Printf("executor: pull image for unit %s: %v", ap.UnitID, err)
 		e.reporter.Report(ap.UnitID, pb.UnitStatusFailed, 0, "pull image: "+err.Error(), nil)
 		return
 	}
 
-	// 3. 创建容器
+	// 5. 创建容器
 	spec := &container.ContainerSpec{
 		ID:    ap.UnitID,
-		Image: ap.Image,
+		Image: image,
 		Name:  ap.UnitID,
 		Env:   map[string]string{},
 		Resource: &container.ResourceLimit{
-			CPUCores:    0, // 不限制
-			MemoryBytes: 0,
+			CPUCores:    e.maxCPUCores,
+			MemoryBytes: e.maxMemoryMB * 1024 * 1024,
 		},
 	}
 
@@ -99,6 +146,15 @@ func (e *Executor) executeUnit(ap AssignPayload) {
 			return
 		}
 	}
+	// 如果是项目作业，挂载项目目录并设置启动命令
+	if projectDir != "" {
+		spec.Mounts = append(spec.Mounts, projectDir+":/workspace")
+		if ap.StartupCommand != "" {
+			spec.Command = []string{"sh", "-c", ap.StartupCommand}
+		}
+		spec.Env["WORKSPACE"] = "/workspace"
+	}
+
 	containerID, err := e.runtime.CreateContainer(ctx, spec)
 	if err != nil {
 		log.Printf("executor: create container for unit %s: %v", ap.UnitID, err)
@@ -139,7 +195,7 @@ func (e *Executor) monitorContainer(unitID, containerID string) {
 
 		if !status.Running {
 			// 容器已退出
-			output := collectOutput(containerID)
+			output := e.collectOutput(ctx, containerID)
 			exitCode := int32(status.ExitCode)
 			errMsg := status.Error
 
@@ -180,6 +236,94 @@ func (e *Executor) cleanupContainer(containerID string) {
 		e.hamiMgr.ReleaseGPUs(containerID)
 		e.hamiMgr.CleanupVGPUConfig(containerID)
 	}
+}
+
+// downloadProject 从上传节点下载项目文件，返回项目本地路径
+func (e *Executor) downloadProject(ctx context.Context, ap AssignPayload) (string, error) {
+	if ap.ProjectDownloadURL == "" {
+		log.Printf("executor: no download URL for project %s", ap.ProjectID)
+		return "", fmt.Errorf("no download URL")
+	}
+
+	projectCacheDir := filepath.Join(os.TempDir(), "cp-projects", ap.ProjectID)
+	if _, err := os.Stat(projectCacheDir); err == nil {
+		// 已缓存
+		log.Printf("executor: project %s already cached at %s", ap.ProjectID, projectCacheDir)
+		return projectCacheDir, nil
+	}
+
+	log.Printf("executor: downloading project %s from %s", ap.ProjectID, ap.ProjectDownloadURL)
+
+	// 下载 zip 文件
+	req, err := http.NewRequestWithContext(ctx, "GET", ap.ProjectDownloadURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("download: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download failed: %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	// 解压到缓存目录
+	if err := os.MkdirAll(projectCacheDir, 0755); err != nil {
+		return "", fmt.Errorf("create cache dir: %w", err)
+	}
+
+	reader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return "", fmt.Errorf("open zip: %w", err)
+	}
+
+	for _, f := range reader.File {
+		fpath := filepath.Join(projectCacheDir, f.Name)
+
+		// 安全检查：防止路径穿越
+		if !strings.HasPrefix(filepath.Clean(fpath), filepath.Clean(projectCacheDir)+string(os.PathSeparator)) {
+			log.Printf("executor: skipping unsafe path: %s", f.Name)
+			continue
+		}
+
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(fpath, 0755)
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
+			return "", fmt.Errorf("create dir %s: %w", filepath.Dir(fpath), err)
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return "", fmt.Errorf("open %s: %w", f.Name, err)
+		}
+
+		out, err := os.Create(fpath)
+		if err != nil {
+			rc.Close()
+			return "", fmt.Errorf("create %s: %w", fpath, err)
+		}
+
+		_, err = io.Copy(out, rc)
+		out.Close()
+		rc.Close()
+		if err != nil {
+			return "", fmt.Errorf("write %s: %w", fpath, err)
+		}
+	}
+
+	log.Printf("executor: project %s extracted to %s", ap.ProjectID, projectCacheDir)
+	return projectCacheDir, nil
 }
 
 // setupGPUEnv 为单元设置 GPU 环境
@@ -230,8 +374,15 @@ func (e *Executor) setupGPUEnv(ap AssignPayload, spec *container.ContainerSpec) 
 	return true
 }
 
-// collectOutput 收集容器输出（占位，P4 后续可扩展）
-func collectOutput(containerID string) []byte {
-	// TODO(P4): 通过 containerd task.IO 或日志 API 收集 stdout/stderr
-	return nil
+// collectOutput 收集容器 stdout 日志
+func (e *Executor) collectOutput(ctx context.Context, containerID string) []byte {
+	if e.runtime == nil {
+		return nil
+	}
+	output, err := e.runtime.GetContainerLogs(ctx, containerID)
+	if err != nil {
+		log.Printf("executor: collect output for %s: %v", containerID, err)
+		return nil
+	}
+	return output
 }

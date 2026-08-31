@@ -13,6 +13,7 @@ server:
     enabled: false                # 仅用于健康检查
 
 tls:
+  enabled: true
   ca_cert: "configs/ca.pem"
   ca_key: "configs/ca-key.pem"
 

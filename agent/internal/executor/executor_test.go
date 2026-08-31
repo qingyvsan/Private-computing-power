@@ -65,6 +65,10 @@ func (m *mockRuntime) GetStatus(ctx context.Context, id string) (*container.Cont
 	return &container.ContainerStatus{ID: id, Running: false, ExitCode: 0}, nil
 }
 
+func (m *mockRuntime) GetContainerLogs(ctx context.Context, id string) ([]byte, error) {
+	return nil, nil
+}
+
 var errTestPullFailed = errors.New("pull failed")
 var errTestCreateFailed = errors.New("create failed")
 var errTestStartFailed = errors.New("start failed")
@@ -73,7 +77,7 @@ func TestExecutor_HandleCommand_UnknownType(t *testing.T) {
 	mgr := NewManager()
 	rep := NewReporter("node-1", nil)
 	rt := &mockRuntime{available: true}
-	ex := NewExecutor(rt, mgr, rep, nil)
+	ex := NewExecutor(rt, mgr, rep, nil, 0, 0)
 
 	// 未知命令类型不应 panic
 	ex.HandleCommand(&pb.Command{Type: "unknown", Payload: []byte("{}")})
@@ -83,7 +87,7 @@ func TestExecutor_HandleAssign_ValidPayload(t *testing.T) {
 	mgr := NewManager()
 	rep := NewReporter("node-1", nil)
 	rt := &mockRuntime{available: true}
-	ex := NewExecutor(rt, mgr, rep, nil)
+	ex := NewExecutor(rt, mgr, rep, nil, 0, 0)
 
 	payload := `{"unit_id":"u1","stage_id":"s1","job_id":"j1","image":"alpine:latest","input":"","index":0}`
 	ex.HandleCommand(&pb.Command{Type: "assign", Payload: []byte(payload)})
@@ -98,7 +102,7 @@ func TestExecutor_HandleAssign_RuntimeUnavailable(t *testing.T) {
 	mgr := NewManager()
 	rep := NewReporter("node-1", nil)
 	rt := &mockRuntime{available: false}
-	ex := NewExecutor(rt, mgr, rep, nil)
+	ex := NewExecutor(rt, mgr, rep, nil, 0, 0)
 
 	payload := `{"unit_id":"u2","stage_id":"s1","job_id":"j1","image":"alpine:latest"}`
 	ex.HandleCommand(&pb.Command{Type: "assign", Payload: []byte(payload)})
@@ -113,7 +117,7 @@ func TestExecutor_HandleAssign_PullFailure(t *testing.T) {
 	mgr := NewManager()
 	rep := NewReporter("node-1", nil)
 	rt := &mockRuntime{available: true, pullErr: errTestPullFailed}
-	ex := NewExecutor(rt, mgr, rep, nil)
+	ex := NewExecutor(rt, mgr, rep, nil, 0, 0)
 
 	payload := `{"unit_id":"u3","image":"nonexistent:latest"}`
 	ex.HandleCommand(&pb.Command{Type: "assign", Payload: []byte(payload)})
@@ -128,7 +132,7 @@ func TestExecutor_HandleAssign_CreateFailure(t *testing.T) {
 	mgr := NewManager()
 	rep := NewReporter("node-1", nil)
 	rt := &mockRuntime{available: true, createErr: errTestCreateFailed}
-	ex := NewExecutor(rt, mgr, rep, nil)
+	ex := NewExecutor(rt, mgr, rep, nil, 0, 0)
 
 	payload := `{"unit_id":"u4","image":"alpine:latest"}`
 	ex.HandleCommand(&pb.Command{Type: "assign", Payload: []byte(payload)})
@@ -144,7 +148,7 @@ func TestExecutor_HandleAssign_StartFailure(t *testing.T) {
 	mgr := NewManager()
 	rep := NewReporter("node-1", nil)
 	rt := &mockRuntime{available: true, startErr: errTestStartFailed}
-	ex := NewExecutor(rt, mgr, rep, nil)
+	ex := NewExecutor(rt, mgr, rep, nil, 0, 0)
 
 	payload := `{"unit_id":"u5","image":"alpine:latest"}`
 	ex.HandleCommand(&pb.Command{Type: "assign", Payload: []byte(payload)})
@@ -159,7 +163,7 @@ func TestExecutor_HandleCommand_NilCommand(t *testing.T) {
 	mgr := NewManager()
 	rep := NewReporter("node-1", nil)
 	rt := &mockRuntime{available: true}
-	ex := NewExecutor(rt, mgr, rep, nil)
+	ex := NewExecutor(rt, mgr, rep, nil, 0, 0)
 
 	// nil 命令不应 panic
 	ex.HandleCommand(nil)
@@ -170,7 +174,7 @@ func TestExecutor_HandleAssign_GPURequest_NoHAMI(t *testing.T) {
 	mgr := NewManager()
 	rep := NewReporter("node-1", nil)
 	rt := &mockRuntime{available: true}
-	ex := NewExecutor(rt, mgr, rep, nil)
+	ex := NewExecutor(rt, mgr, rep, nil, 0, 0)
 
 	payload := `{"unit_id":"u6","image":"alpine:latest","gpu_request":{"memory_mb":4096,"cores":50,"count":1}}`
 	ex.HandleCommand(&pb.Command{Type: "assign", Payload: []byte(payload)})

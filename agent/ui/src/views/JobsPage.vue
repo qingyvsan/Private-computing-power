@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { listJobs, type Job } from '../api/client'
 import { statusType, formatTime } from '../utils/format'
+import { usePolling } from '../utils/usePolling'
 
 const router = useRouter()
 const jobs = ref<Job[]>([])
@@ -10,12 +11,18 @@ const totalCount = ref(0)
 const loading = ref(true)
 const statusFilter = ref('')
 
-onMounted(async () => {
+async function fetchJobs() {
   try {
     const resp = await listJobs()
     jobs.value = resp.jobs
     totalCount.value = resp.total_count
   } catch {}
+}
+
+usePolling(fetchJobs, 10000)
+
+onMounted(async () => {
+  await fetchJobs()
   loading.value = false
 })
 

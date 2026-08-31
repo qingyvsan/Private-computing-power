@@ -2,10 +2,15 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"net"
+	"os"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	pb "computing-power/proto/v1"
@@ -15,6 +20,9 @@ import (
 type Config struct {
 	Address string
 	Timeout time.Duration
+	TLSCert string // gRPC mTLS 客户端证书路径
+	TLSKey  string // gRPC mTLS 客户端私钥路径
+	CACert  string // gRPC CA 证书路径
 }
 
 // Client 调度器 gRPC 客户端
@@ -26,11 +34,48 @@ type Client struct {
 
 // New 创建调度器客户端
 func New(cfg Config) (*Client, error) {
-	conn, err := grpc.NewClient(
-		cfg.Address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()), // TODO(P6): 使用 mTLS
-		grpc.WithDefaultCallOptions(grpc.ForceCodecV2(pb.JSONCodec{})),
-	)
+	var creds credentials.TransportCredentials
+
+	if cfg.CACert != "" {
+		caCertPEM, err := os.ReadFile(cfg.CACert)
+		if err != nil {
+			return nil, fmt.Errorf("read CA cert: %w", err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCertPEM) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+
+		tlsConfig := &tls.Config{
+			RootCAs:    caPool,
+			MinVersion: tls.VersionTLS12,
+		}
+
+		if cfg.TLSCert != "" && cfg.TLSKey != "" {
+			clientCert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+			if err != nil {
+				return nil, fmt.Errorf("load client cert: %w", err)
+			}
+			tlsConfig.Certificates = []tls.Certificate{clientCert}
+		}
+
+		// 从地址解析 ServerName
+		if host, _, err := net.SplitHostPort(cfg.Address); err == nil {
+			tlsConfig.ServerName = host
+		}
+
+		creds = credentials.NewTLS(tlsConfig)
+	}
+
+	var opts []grpc.DialOption
+	if creds != nil {
+		opts = append(opts, grpc.WithTransportCredentials(creds))
+	} else {
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+	opts = append(opts, grpc.WithDefaultCallOptions(grpc.ForceCodecV2(pb.JSONCodec{})))
+
+	conn, err := grpc.NewClient(cfg.Address, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("connect to scheduler: %w", err)
 	}

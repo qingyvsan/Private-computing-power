@@ -3,16 +3,23 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getNode, type Node } from '../api/client'
 import { statusType, formatBytes } from '../utils/format'
+import { usePolling } from '../utils/usePolling'
 
 const route = useRoute()
 const router = useRouter()
 const node = ref<Node | null>(null)
 const loading = ref(true)
 
-onMounted(async () => {
+async function fetchNode() {
   try {
     node.value = await getNode(route.params.id as string)
   } catch {}
+}
+
+usePolling(fetchNode, 8000)
+
+onMounted(async () => {
+  await fetchNode()
   loading.value = false
 })
 

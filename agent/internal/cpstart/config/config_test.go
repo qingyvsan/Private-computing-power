@@ -68,6 +68,9 @@ func TestToAgentConfig(t *testing.T) {
 	c.Agent.DataDir = "/data/cpstart"
 	c.Scheduler.Address = "192.168.1.1:9090"
 	c.Resources.ReportGPU = false
+	c.Nebula.Enabled = true
+	c.HAMI.Enabled = true
+	c.Updater.Enabled = true
 
 	ac := c.ToAgentConfig()
 	if ac.Agent.Name != "test-agent" {
@@ -78,6 +81,15 @@ func TestToAgentConfig(t *testing.T) {
 	}
 	if ac.Resources.ReportGPU != false {
 		t.Errorf("expected ReportGPU=false, got %v", ac.Resources.ReportGPU)
+	}
+	if ac.Nebula.Enabled != true {
+		t.Errorf("expected Nebula.Enabled=true, got %v", ac.Nebula.Enabled)
+	}
+	if ac.HAMI.Enabled != true {
+		t.Errorf("expected HAMI.Enabled=true, got %v", ac.HAMI.Enabled)
+	}
+	if ac.Updater.Enabled != true {
+		t.Errorf("expected Updater.Enabled=true, got %v", ac.Updater.Enabled)
 	}
 }
 

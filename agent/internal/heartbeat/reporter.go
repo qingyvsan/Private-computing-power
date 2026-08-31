@@ -137,12 +137,12 @@ func (r *Reporter) processResponse(resp *pb.HeartbeatResponse) {
 		}
 	}
 
-	// TODO(P3): 根据服务器建议调整心跳间隔
-	// if resp.HeartbeatInterval != "" {
-	// 	if newInterval, err := time.ParseDuration(resp.HeartbeatInterval); err == nil {
-	// 		r.interval = newInterval
-	// 	}
-	// }
+	// 根据服务器建议调整心跳间隔
+		if resp.HeartbeatInterval != "" {
+			if newInterval, err := time.ParseDuration(resp.HeartbeatInterval); err == nil {
+				r.interval = newInterval
+			}
+		}
 }
 
 // StartWithRetry 带重连的心跳上报

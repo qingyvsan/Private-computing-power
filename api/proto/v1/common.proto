@@ -185,6 +185,10 @@ message Job {
   int64 created_at = 12;
   int64 updated_at = 13;
   int64 completed_at = 14;
+  bool allow_self_assignment = 15;
+  string project_id = 16;
+  string startup_command = 17;
+  string base_image = 18;
 }
 
 // ========== 信任图 ==========

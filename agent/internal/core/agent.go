@@ -2,13 +2,18 @@ package core
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
+	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	pb "computing-power/proto/v1"
@@ -97,12 +102,22 @@ func (a *Agent) SetOnRegistered(fn func(nodeID string)) {
 
 // Start 启动 Agent
 func (a *Agent) Start(ctx context.Context) error {
+	// 构建 TLS 凭证
+	tlsCreds, err := a.buildTLSCredentials()
+	if err != nil {
+		return fmt.Errorf("build TLS credentials: %w", err)
+	}
+
 	// 建立到调度器的连接
-	conn, err := grpc.NewClient(
-		a.cfg.Scheduler.Address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()), // TODO(P6): 使用 mTLS
-		grpc.WithDefaultCallOptions(grpc.ForceCodecV2(pb.JSONCodec{})),
-	)
+	var dialOpts []grpc.DialOption
+	if tlsCreds != nil {
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(tlsCreds))
+	} else {
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+	dialOpts = append(dialOpts, grpc.WithDefaultCallOptions(grpc.ForceCodecV2(pb.JSONCodec{})))
+
+	conn, err := grpc.NewClient(a.cfg.Scheduler.Address, dialOpts...)
 	if err != nil {
 		return fmt.Errorf("connect to scheduler: %w", err)
 	}
@@ -113,6 +128,19 @@ func (a *Agent) Start(ctx context.Context) error {
 	resp, err := a.register(ctx)
 	if err != nil {
 		return fmt.Errorf("register node: %w", err)
+	}
+
+	// 如果注册返回了 gRPC 客户端证书，保存到磁盘并重新连接
+	if resp != nil && len(resp.GrpcCertificate) > 0 && len(resp.GrpcPrivateKey) > 0 {
+		if err := a.saveGRPCCerts(resp); err != nil {
+			log.Printf("save gRPC certs: %v (continuing without mTLS)", err)
+		} else {
+			log.Printf("gRPC mTLS client certificate saved, reconnecting...")
+			a.conn.Close()
+			if err := a.reconnectWithMTLS(ctx); err != nil {
+				return fmt.Errorf("reconnect with mTLS: %w", err)
+			}
+		}
 	}
 
 	// 配置并启动 Nebula（如果启用且调度器返回了证书）
@@ -147,7 +175,7 @@ func (a *Agent) Start(ctx context.Context) error {
 		a.cfg.HAMI.DefaultCores,
 	)
 
-	a.exec = executor.NewExecutor(a.runtime, a.manager, a.reporter, hamiMgr)
+	a.exec = executor.NewExecutor(a.runtime, a.manager, a.reporter, hamiMgr, a.cfg.Resources.MaxCPUCores, a.cfg.Resources.MaxMemoryMB)
 
 	// 在后台启动状态上报流
 	go func() {
@@ -227,6 +255,110 @@ func (a *Agent) Stop() {
 		a.conn.Close()
 	}
 	log.Printf("agent stopped")
+}
+
+// buildTLSCredentials 从配置构建 TLS 凭证
+// 如果 CA 证书路径为空，返回 nil（使用不安全连接）
+// 如果客户端证书路径为空，仅验证服务器证书（引导模式）
+func (a *Agent) buildTLSCredentials() (credentials.TransportCredentials, error) {
+	caCertPath := a.cfg.Scheduler.CACert
+	if caCertPath == "" {
+		return nil, nil
+	}
+
+	caCertPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		return nil, fmt.Errorf("read CA cert: %w", err)
+	}
+
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse CA certificate")
+	}
+
+	tlsConfig := &tls.Config{
+		RootCAs:    caPool,
+		MinVersion: tls.VersionTLS12,
+	}
+
+	// 如果存在客户端证书，加载它
+	clientCertPath := a.cfg.Scheduler.TLSCert
+	clientKeyPath := a.cfg.Scheduler.TLSKey
+	if clientCertPath != "" && clientKeyPath != "" {
+		if _, err := os.Stat(clientCertPath); err == nil {
+			if _, err := os.Stat(clientKeyPath); err == nil {
+				clientCert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+				if err != nil {
+					log.Printf("load client cert: %v (will bootstrap)", err)
+				} else {
+					tlsConfig.Certificates = []tls.Certificate{clientCert}
+				}
+			}
+		}
+	}
+
+	// 从地址解析 ServerName
+	host, _, err := net.SplitHostPort(a.cfg.Scheduler.Address)
+	if err == nil {
+		tlsConfig.ServerName = host
+	}
+
+	return credentials.NewTLS(tlsConfig), nil
+}
+
+// saveGRPCCerts 保存 gRPC 客户端证书到磁盘
+func (a *Agent) saveGRPCCerts(resp *pb.RegisterNodeResponse) error {
+	certDir := filepath.Join(a.cfg.Agent.DataDir, "grpc")
+	if err := os.MkdirAll(certDir, 0700); err != nil {
+		return fmt.Errorf("create cert dir: %w", err)
+	}
+
+	caPath := filepath.Join(certDir, "ca.crt")
+	certPath := filepath.Join(certDir, "client.crt")
+	keyPath := filepath.Join(certDir, "client.key")
+
+	if err := os.WriteFile(caPath, resp.CACertificate, 0644); err != nil {
+		return fmt.Errorf("write CA cert: %w", err)
+	}
+	if err := os.WriteFile(certPath, resp.GrpcCertificate, 0644); err != nil {
+		return fmt.Errorf("write client cert: %w", err)
+	}
+	if err := os.WriteFile(keyPath, resp.GrpcPrivateKey, 0600); err != nil {
+		return fmt.Errorf("write client key: %w", err)
+	}
+
+	// 更新配置路径，以便下次启动时自动加载
+	a.cfg.Scheduler.CACert = caPath
+	a.cfg.Scheduler.TLSCert = certPath
+	a.cfg.Scheduler.TLSKey = keyPath
+
+	log.Printf("gRPC mTLS certs saved to %s", certDir)
+	return nil
+}
+
+// reconnectWithMTLS 使用已保存的客户端证书重新连接
+func (a *Agent) reconnectWithMTLS(ctx context.Context) error {
+	tlsCreds, err := a.buildTLSCredentials()
+	if err != nil {
+		return fmt.Errorf("build mTLS credentials: %w", err)
+	}
+	if tlsCreds == nil {
+		return fmt.Errorf("no TLS credentials available for reconnection")
+	}
+
+	conn, err := grpc.NewClient(
+		a.cfg.Scheduler.Address,
+		grpc.WithTransportCredentials(tlsCreds),
+		grpc.WithDefaultCallOptions(grpc.ForceCodecV2(pb.JSONCodec{})),
+	)
+	if err != nil {
+		return fmt.Errorf("connect with mTLS: %w", err)
+	}
+
+	a.conn = conn
+	a.client = pb.NewSchedulerServiceClient(conn)
+	log.Printf("reconnected to scheduler with mTLS")
+	return nil
 }
 
 // parseDuration 解析时长配置

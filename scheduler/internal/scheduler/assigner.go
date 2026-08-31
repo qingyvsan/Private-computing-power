@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -36,8 +37,15 @@ func (e *Engine) assignUnit(unit *pb.Unit, node *pb.Node, job *pb.Job) bool {
 		return false
 	}
 
-	// 构造 push 命令
-	cmd := buildAssignCommand(unit, job)
+	// 构造 push 命令（包含项目下载 URL）
+	var projectDownloadURL string
+	if job.ProjectID != "" {
+		ownerNode := e.registry.GetNode(job.OwnerID)
+		if ownerNode != nil && ownerNode.OverlayIP != "" {
+			projectDownloadURL = fmt.Sprintf("http://%s:8080/api/v1/projects/%s/download", ownerNode.OverlayIP, job.ProjectID)
+		}
+	}
+	cmd := buildAssignCommand(unit, job, projectDownloadURL)
 	e.PushCommand(node.ID, cmd)
 
 	log.Printf("engine: assigned unit %s -> node %s (job=%s, stage=%s)",
@@ -64,7 +72,7 @@ func (e *Engine) assignUnits(units []*pb.Unit, job *pb.Job) {
 		}
 
 		// 过滤
-		candidates := e.Filter(allNodes, spec, job.OwnerID)
+		candidates := e.Filter(allNodes, spec, job.OwnerID, job.AllowSelfAssignment)
 		if len(candidates) == 0 {
 			log.Printf("engine: no candidates for unit %s (job=%s)", unit.ID, job.ID)
 			continue
@@ -113,7 +121,7 @@ func (e *Engine) loadRetryEligibleUnits() ([]*pb.Unit, error) {
 }
 
 // buildAssignCommand 构造 Agent 执行命令
-func buildAssignCommand(unit *pb.Unit, job *pb.Job) *pb.Command {
+func buildAssignCommand(unit *pb.Unit, job *pb.Job, projectDownloadURL string) *pb.Command {
 	payload := map[string]interface{}{
 		"unit_id":  unit.ID,
 		"stage_id": unit.StageID,
@@ -131,6 +139,17 @@ func buildAssignCommand(unit *pb.Unit, job *pb.Job) *pb.Command {
 			"memory_mb": gpuReq.MemoryMB,
 			"cores":     gpuReq.Cores,
 			"count":     gpuReq.Count,
+		}
+	}
+
+	// 包含项目信息
+	if job.ProjectID != "" {
+		payload["project_id"] = job.ProjectID
+		payload["startup_command"] = job.StartupCommand
+		payload["base_image"] = job.BaseImage
+		payload["project_node_id"] = job.OwnerID
+		if projectDownloadURL != "" {
+			payload["project_download_url"] = projectDownloadURL
 		}
 	}
 
@@ -187,7 +206,7 @@ func (e *Engine) AssignToNode(nodeID string) (*pb.Unit, error) {
 		}
 
 		spec := getResourceSpecForUnit(unit, job)
-		if !e.nodePassesFilter(node, spec, job.OwnerID) {
+		if !e.nodePassesFilter(node, spec, job.OwnerID, job.AllowSelfAssignment) {
 			continue
 		}
 
@@ -214,16 +233,20 @@ func (e *Engine) AssignToNode(nodeID string) (*pb.Unit, error) {
 }
 
 // nodePassesFilter 检查单个节点是否通过所有过滤条件
-func (e *Engine) nodePassesFilter(node *pb.Node, spec *pb.ResourceSpec, ownerID string) bool {
+func (e *Engine) nodePassesFilter(node *pb.Node, spec *pb.ResourceSpec, ownerID string, allowSelfAssignment bool) bool {
 	if node.Status != pb.NodeStatusOnline && node.Status != pb.NodeStatusBusy {
 		return false
 	}
 	if spec != nil && node.Resources != nil && !resource.Fits(node.Resources, spec) {
 		return false
 	}
+	if ownerID != "" && node.ID == ownerID && !allowSelfAssignment {
+		return false
+	}
 	if ownerID != "" && node.ID != ownerID && !e.trust.IsReachable(ownerID, node.ID, 10) {
 		return false
 	}
+
 	if ownerID != "" {
 		if contains(node.BlockList, ownerID) {
 			return false

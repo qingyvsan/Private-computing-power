@@ -60,6 +60,8 @@ message RegisterNodeResponse {
   bytes nebula_private_key = 5;
   string nebula_config = 4;
   bytes ca_certificate = 6;
+  bytes grpc_certificate = 7;
+  bytes grpc_private_key = 8;
 }
 
 message HeartbeatRequest {

@@ -168,7 +168,9 @@ func (r *Runner) LocalResources() *pb.NodeResources {
 // applyResourceLimits 将 cpstart 资源限制应用到 agent 配置
 func (r *Runner) applyResourceLimits(ac *config.Config) {
 	if r.cfg.Resources.MaxCPUCores > 0 {
-		// TODO(P4): 在 agent 启动时限制 CPU 使用
-		_ = ac
+		ac.Resources.MaxCPUCores = r.cfg.Resources.MaxCPUCores
+	}
+	if r.cfg.Resources.MaxMemoryMB > 0 {
+		ac.Resources.MaxMemoryMB = r.cfg.Resources.MaxMemoryMB
 	}
 }

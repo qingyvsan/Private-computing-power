@@ -25,7 +25,7 @@ var nodeListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "列出所有节点",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}
@@ -70,7 +70,7 @@ var nodeStatusCmd = &cobra.Command{
 	Short: "查看节点详情",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}
@@ -120,7 +120,7 @@ var nodeUnregisterCmd = &cobra.Command{
 	Short: "注销并删除节点",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}

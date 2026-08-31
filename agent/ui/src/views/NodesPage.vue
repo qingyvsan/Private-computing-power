@@ -3,16 +3,23 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { listNodes, type Node } from '../api/client'
 import { statusType } from '../utils/format'
+import { usePolling } from '../utils/usePolling'
 
 const router = useRouter()
 const nodes = ref<Node[]>([])
 const loading = ref(true)
 const searchQuery = ref('')
 
-onMounted(async () => {
+async function fetchNodes() {
   try {
     nodes.value = await listNodes()
   } catch {}
+}
+
+usePolling(fetchNodes, 10000)
+
+onMounted(async () => {
+  await fetchNodes()
   loading.value = false
 })
 

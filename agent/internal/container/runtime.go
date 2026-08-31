@@ -62,4 +62,6 @@ type Runtime interface {
 	GetStatus(ctx context.Context, id string) (*ContainerStatus, error)
 	// IsAvailable 运行时是否可用
 	IsAvailable() bool
+	// GetContainerLogs 获取容器 stdout 日志
+	GetContainerLogs(ctx context.Context, id string) ([]byte, error)
 }

@@ -41,7 +41,7 @@ func NewHTTPServer(cfg *cpstartcfg.Config, bridge *Bridge, runner *agent.Runner)
 	h = recoveryMiddleware(h)
 	h = localhostMiddleware(h)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Console.Port)
+	addr := fmt.Sprintf("0.0.0.0:%d", cfg.Console.Port)
 	httpServer := &http.Server{
 		Addr:         addr,
 		Handler:      h,

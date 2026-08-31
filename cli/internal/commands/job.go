@@ -224,7 +224,7 @@ var jobSubmitCmd = &cobra.Command{
 			return err
 		}
 
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}
@@ -248,7 +248,7 @@ var jobListCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ownerID, _ := cmd.Flags().GetString("owner")
 
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}
@@ -280,7 +280,7 @@ var jobStatusCmd = &cobra.Command{
 	Short: "查看作业状态",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}
@@ -319,7 +319,7 @@ var jobCancelCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ownerID, _ := cmd.Flags().GetString("owner")
 
-		c, err := client.New(client.Config{Address: schedulerAddr})
+		c, err := client.New(client.Config{Address: schedulerAddr, CACert: caCert, TLSCert: tlsCert, TLSKey: tlsKey})
 		if err != nil {
 			return err
 		}
