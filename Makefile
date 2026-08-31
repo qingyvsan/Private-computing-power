@@ -16,7 +16,7 @@ BIN_DIR := bin
 
 .PHONY: proto build build-all test test-coverage lint clean \
 	dev-scheduler dev-agent \
-	build-scheduler build-agent build-cli build-ui build-cpstart dev-cpstart \
+	build-scheduler build-agent build-cli build-ui build-cpstart build-cpstart-linux dev-cpstart \
 	run-scheduler run-agent
 
 # ========== Protobuf 生成 ==========
@@ -42,6 +42,9 @@ build-ui:
 
 build-cpstart: build-ui
 	cd agent && $(GO) build $(LDFLAGS) -o ../$(BIN_DIR)/cpstart ./cmd/cpstart
+
+build-cpstart-linux: build-ui
+	cd agent && GOOS=linux GOARCH=amd64 $(GO) build $(LDFLAGS) -o ../$(BIN_DIR)/cpstart-linux ./cmd/cpstart
 
 dev-cpstart:
 	cd agent && $(GO) run ./cmd/cpstart --config ./configs/cpstart.yaml

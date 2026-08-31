@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	pb "computing-power/proto/v1"
@@ -11,6 +14,7 @@ import (
 	"computing-power/agent/internal/container"
 	"computing-power/agent/internal/cpstart/agent"
 	cpstartcfg "computing-power/agent/internal/cpstart/config"
+	"computing-power/agent/internal/cpstart/wsl2"
 )
 
 // Handler REST API 处理器
@@ -18,6 +22,7 @@ type Handler struct {
 	bridge *Bridge
 	runner *agent.Runner
 	cfg    *cpstartcfg.Config
+	wsl2   *wsl2.Automator
 }
 
 // NewHandler 创建 REST 处理器
@@ -26,6 +31,7 @@ func NewHandler(bridge *Bridge, runner *agent.Runner, cfg *cpstartcfg.Config) *H
 		bridge: bridge,
 		runner: runner,
 		cfg:    cfg,
+		wsl2:   wsl2.New(),
 	}
 }
 
@@ -39,6 +45,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// 本地状态
 	mux.HandleFunc("GET /api/v1/status", h.localStatus)
 	mux.HandleFunc("GET /api/v1/status/resources", h.localResources)
+
+	// 设置（资源限制等）
+	mux.HandleFunc("GET /api/v1/settings", h.getSettings)
+	mux.HandleFunc("PUT /api/v1/settings/resources", h.updateResources)
 
 	// 集群节点
 	mux.HandleFunc("GET /api/v1/nodes", h.listNodes)
@@ -58,6 +68,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// 邀请码
 	mux.HandleFunc("POST /api/v1/invite-codes", h.createInvite)
 	mux.HandleFunc("POST /api/v1/invite-codes/redeem", h.redeemInvite)
+
+	// WSL2 自动配置
+	mux.HandleFunc("POST /api/v1/setup/wsl2/start", h.startWSL2)
+	mux.HandleFunc("GET /api/v1/setup/wsl2/status", h.wsl2Status)
 }
 
 // ========== JSON 响应工具 ==========
@@ -128,6 +142,12 @@ func (h *Handler) setupConfig(w http.ResponseWriter, r *http.Request) {
 	if incoming.Resources.MaxMemoryMB > 0 {
 		h.cfg.Resources.MaxMemoryMB = incoming.Resources.MaxMemoryMB
 	}
+	// ReportGPU 始终应用（零值 false 表示关闭 GPU 上报）
+	if incoming.Resources.ReportGPU {
+		h.cfg.Resources.ReportGPU = true
+	} else {
+		h.cfg.Resources.ReportGPU = false
+	}
 
 	// 保存配置
 	if err := h.cfg.Save(h.cfg.ConfigPath()); err != nil {
@@ -152,9 +172,11 @@ func (h *Handler) setupConfig(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) setupCheck(w http.ResponseWriter, r *http.Request) {
 	checks := map[string]interface{}{
-		"scheduler":  false,
-		"containerd": false,
-		"gpu":        false,
+		"scheduler":     false,
+		"containerd":    false,
+		"gpu":           false,
+		"os":            runtime.GOOS,
+		"wsl_available": false,
 	}
 
 	// 检查调度器连通性
@@ -162,6 +184,20 @@ func (h *Handler) setupCheck(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		_, err = client.ListNodes(r.Context(), &pb.ListNodesRequest{})
 		checks["scheduler"] = err == nil
+	}
+
+	// 检查容器运行时可用性
+	if runtime.GOOS == "windows" {
+		// Windows 上检查 wsl.exe 是否可用（WSL2 容器后端）
+		if _, err := exec.LookPath("wsl.exe"); err == nil {
+			checks["wsl_available"] = true
+		}
+		checks["containerd"] = false // Windows 原生不支持 containerd
+	} else {
+		// Linux/macOS 上检查 containerd socket
+		if _, err := os.Stat("/run/containerd/containerd.sock"); err == nil {
+			checks["containerd"] = true
+		}
 	}
 
 	// 检查 GPU 可用性
@@ -188,6 +224,65 @@ func (h *Handler) localStatus(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) localResources(w http.ResponseWriter, r *http.Request) {
 	res := h.runner.LocalResources()
 	writeOK(w, res)
+}
+
+// ========== 设置（资源限制等） ==========
+
+func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
+	writeOK(w, map[string]interface{}{
+		"agent_name":     h.cfg.Agent.Name,
+		"scheduler":      h.cfg.Scheduler.Address,
+		"max_cpu_cores":  h.cfg.Resources.MaxCPUCores,
+		"max_memory_mb":  h.cfg.Resources.MaxMemoryMB,
+		"report_gpu":     h.cfg.Resources.ReportGPU,
+		"node_id":        h.runner.NodeID(),
+		"agent_status":   h.runner.Status().String(),
+		"data_dir":       h.cfg.Agent.DataDir,
+	})
+}
+
+func (h *Handler) updateResources(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	defer r.Body.Close()
+
+	var incoming struct {
+		MaxCPUCores float64 `json:"max_cpu_cores"`
+		MaxMemoryMB int64   `json:"max_memory_mb"`
+		ReportGPU   bool    `json:"report_gpu"`
+	}
+	if err := json.Unmarshal(body, &incoming); err != nil {
+		writeError(w, http.StatusBadRequest, "parse request: "+err.Error())
+		return
+	}
+
+	// 始终应用所有值（包括 0，表示无限制）
+	h.cfg.Resources.MaxCPUCores = incoming.MaxCPUCores
+	h.cfg.Resources.MaxMemoryMB = incoming.MaxMemoryMB
+	h.cfg.Resources.ReportGPU = incoming.ReportGPU
+
+	// 保存配置
+	if err := h.cfg.Save(h.cfg.ConfigPath()); err != nil {
+		writeError(w, http.StatusInternalServerError, "save config: "+err.Error())
+		return
+	}
+
+	// 重启 Agent 使配置生效
+	h.runner.Stop()
+	if err := h.runner.Start(); err != nil {
+		writeError(w, http.StatusInternalServerError, "start agent: "+err.Error())
+		return
+	}
+
+	writeOK(w, map[string]interface{}{
+		"status":         "updated",
+		"max_cpu_cores":  h.cfg.Resources.MaxCPUCores,
+		"max_memory_mb":  h.cfg.Resources.MaxMemoryMB,
+		"report_gpu":     h.cfg.Resources.ReportGPU,
+	})
 }
 
 // ========== 集群节点 ==========
@@ -413,4 +508,17 @@ func (h *Handler) redeemInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOK(w, resp)
+}
+// ========== WSL2 自动配置 ==========
+
+func (h *Handler) startWSL2(w http.ResponseWriter, r *http.Request) {
+	if err := h.wsl2.Start(); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeOK(w, map[string]string{"status": "started"})
+}
+
+func (h *Handler) wsl2Status(w http.ResponseWriter, r *http.Request) {
+	writeOK(w, h.wsl2.Status())
 }

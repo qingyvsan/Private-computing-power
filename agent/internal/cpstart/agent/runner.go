@@ -59,7 +59,7 @@ func NewRunner(cfg *cpstartcfg.Config) *Runner {
 	return &Runner{
 		cfg:  cfg,
 		done: make(chan struct{}),
-		col:  heartbeat.NewCollector(cfg.Resources.ReportGPU, true, nil),
+		col:  heartbeat.NewCollector(cfg.Resources.ReportGPU, true, nil, cfg.Scheduler.Address),
 	}
 }
 
@@ -73,6 +73,7 @@ func (r *Runner) Start() error {
 	}
 
 	r.status.Store(int32(AgentStarting))
+	r.done = make(chan struct{}) // 重置 done channel，防止重复 close
 	ac := r.cfg.ToAgentConfig()
 
 	// 处理资源限制
@@ -84,6 +85,12 @@ func (r *Runner) Start() error {
 		r.lastErr = err
 		return err
 	}
+
+	// 捕获注册后的节点 ID
+	agent.SetOnRegistered(func(nodeID string) {
+		r.nodeID.Store(nodeID)
+	})
+
 	r.agent = agent
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -95,9 +102,10 @@ func (r *Runner) Start() error {
 
 // run 在后台 goroutine 中运行 Agent
 func (r *Runner) run(ctx context.Context) {
+	done := r.done // 捕获启动时的 channel，防止 Start() 重置后误关闭新 channel
 	defer func() {
 		r.status.Store(int32(AgentStopped))
-		close(r.done)
+		close(done)
 	}()
 
 	log.Printf("cpstart: starting agent (scheduler=%s, name=%s)", r.cfg.Scheduler.Address, r.cfg.Agent.Name)

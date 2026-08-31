@@ -91,6 +91,13 @@ func (s *Server) Start(ctx context.Context, listen string, grpcServer *grpc.Serv
 	}
 	log.Printf("gRPC server listening on %s", listen)
 
+	// 从 BoltDB 恢复节点到注册中心
+	if nodes, err := s.store.ListNodes(); err == nil {
+		s.registry.LoadNodes(nodes)
+	} else {
+		log.Printf("load nodes from store: %v", err)
+	}
+
 	// 启动定期故障检测循环（2 倍心跳间隔）
 	checkInterval := s.heartbeatInterval * 2
 	if checkInterval < time.Second {
@@ -164,7 +171,7 @@ func (s *Server) RegisterNode(ctx context.Context, req *pb.RegisterNodeRequest) 
 		Version:             req.Version,
 		Resources:           req.InitialResources,
 		Status:              pb.NodeStatusOnline,
-		Discoverable:        "trust_only",
+		Discoverable:        "public",
 		RegisteredAt:        time.Now().UnixMilli(),
 		Reputation:          1.0,
 		MaxTasks:            10,
@@ -189,8 +196,13 @@ func (s *Server) RegisterNode(ctx context.Context, req *pb.RegisterNodeRequest) 
 // UnregisterNode 注销节点
 func (s *Server) UnregisterNode(ctx context.Context, req *pb.UnregisterNodeRequest) (*pb.UnregisterNodeResponse, error) {
 	s.registry.Unregister(req.NodeID)
-	if err := s.ipam.Release(req.NodeID); err != nil {
-		log.Printf("ipam release for %s: %v", req.NodeID, err)
+	if s.ipam != nil {
+		if err := s.ipam.Release(req.NodeID); err != nil {
+			log.Printf("ipam release for %s: %v", req.NodeID, err)
+		}
+	}
+	if err := s.store.DeleteNode(req.NodeID); err != nil {
+		log.Printf("store delete node %s: %v", req.NodeID, err)
 	}
 	log.Printf("node unregistered: %s reason: %s", req.NodeID, req.Reason)
 	return &pb.UnregisterNodeResponse{Success: true}, nil

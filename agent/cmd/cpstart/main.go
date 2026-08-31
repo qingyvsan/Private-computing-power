@@ -6,7 +6,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -65,11 +68,17 @@ func run() error {
 		return fmt.Errorf("start http server: %v", err)
 	}
 
-	// 打开浏览器（如果配置了自动打开）
+	// 打开浏览器（如果配置了自动打开且不在 WSL2 中）
 	url := fmt.Sprintf("http://127.0.0.1:%d", cfg.Console.Port)
 	if cfg.Console.AutoOpen {
-		if err := openBrowser(url); err != nil {
-			log.Printf("cpstart: open browser: %v", err)
+		if isWSL2() {
+			log.Printf("cpstart: detected WSL2 environment, skipping browser open")
+			fmt.Printf("\n  Access the web UI from Windows at: %s\n", url)
+			fmt.Printf("  (WSL2 auto-forwards ports to Windows)\n\n")
+		} else {
+			if err := openBrowser(url); err != nil {
+				log.Printf("cpstart: open browser: %v", err)
+			}
 		}
 	}
 	log.Printf("cpstart: console available at %s", url)
@@ -108,33 +117,32 @@ func openBrowser(url string) error {
 	}
 
 	// 跨平台浏览器打开
-	var cmd string
-	var args []string
-	switch goos := os.Getenv("GOOS"); goos {
+	switch runtime.GOOS {
 	case "windows":
-		cmd = "cmd"
-		args = []string{"/c", "start", url}
+		return runCommand("cmd.exe", "/c", "start", url)
+	case "darwin":
+		return runCommand("open", url)
 	default:
-		// 根据 runtime.GOOS 判断
-		if os.PathSeparator == '\\' {
-			cmd = "cmd"
-			args = []string{"/c", "start", url}
-		} else {
-			cmd = "xdg-open"
-			args = []string{url}
-		}
+		return runCommand("xdg-open", url)
 	}
-	return runCommand(cmd, args...)
 }
 
 func runCommand(cmd string, args ...string) error {
-	// 简单的命令执行包装
-	// 使用 os.StartProcess 或 exec.Command
-	proc, err := os.StartProcess(cmd, append([]string{cmd}, args...), &os.ProcAttr{
-		Files: []*os.File{nil, nil, nil},
-	})
-	if err != nil {
-		return err
+	// 使用 exec.Command 确保 PATH 查找正确
+	return exec.Command(cmd, args...).Start()
+}
+
+// isWSL2 检测当前是否运行在 WSL2 环境中
+// 通过检查 /proc/sys/kernel/osrelease 是否包含 "microsoft" 或 "WSL"
+// 也支持通过 CP_WSL2 环境变量手动指定
+func isWSL2() bool {
+	if os.Getenv("CP_WSL2") == "1" {
+		return true
 	}
-	return proc.Release()
+	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return false
+	}
+	content := strings.ToLower(string(data))
+	return strings.Contains(content, "microsoft") || strings.Contains(content, "wsl")
 }

@@ -35,6 +35,16 @@ func NewRegistry(windowSize, minSamples int, phiThreshold float64) *Registry {
 	}
 }
 
+// LoadNodes 从持久化存储加载节点到注册中心（调度器启动时调用）
+func (r *Registry) LoadNodes(nodes []*pb.Node) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, n := range nodes {
+		r.nodes[n.ID] = n
+	}
+	log.Printf("registry: loaded %d nodes from store", len(nodes))
+}
+
 // SetHeartbeatTimeout 设置心跳超时（故障检测循环用）
 func (r *Registry) SetHeartbeatTimeout(timeout time.Duration) {
 	r.mu.Lock()
@@ -129,9 +139,7 @@ func (r *Registry) Register(n *pb.Node) {
 func (r *Registry) Unregister(nodeID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if n, ok := r.nodes[nodeID]; ok {
-		n.Status = pb.NodeStatusOffline
-	}
+	delete(r.nodes, nodeID)
 	r.detector.Remove(nodeID)
 }
 

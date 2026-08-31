@@ -21,7 +21,7 @@ func DiscoverGPUs() ([]*pb.GPUDevice, error) {
 	}
 
 	cmd := exec.Command(binary,
-		"--query-gpu=index,uuid,name,memory.total,memory.free",
+		"--query-gpu=index,uuid,name,memory.total,memory.free,utilization.gpu",
 		"--format=csv,noheader,nounits",
 	)
 	stdout, err := cmd.Output()
@@ -40,7 +40,7 @@ func DiscoverGPUs() ([]*pb.GPUDevice, error) {
 }
 
 // parseNvidiaSmiCSV 解析 nvidia-smi CSV 输出
-// 输入格式: index,uuid,name,memory.total,memory.free
+// 输入格式: index,uuid,name,memory.total,memory.free,utilization.gpu
 // 处理 BOM、[N/A] 值、部分行失败等异常
 func parseNvidiaSmiCSV(reader io.Reader) ([]*pb.GPUDevice, error) {
 	r := csv.NewReader(reader)
@@ -77,13 +77,21 @@ func parseNvidiaSmiCSV(reader io.Reader) ([]*pb.GPUDevice, error) {
 			freeMB = totalMB
 		}
 
+		// 解析 utilization.gpu（第 6 列，可选）
+		var computeUtil float64
+		if len(row) >= 6 {
+			utilStr := strings.TrimSpace(row[5])
+			computeUtil = parseFloat64(utilStr)
+		}
+
 		_ = indexStr // index 仅用于调试，不存储
 		gpus = append(gpus, &pb.GPUDevice{
 			UUID:             uuid,
 			Model:            model,
 			MemoryTotalMB:    totalMB,
+			MemoryUsedMB:     totalMB - freeMB,
 			MemoryAvailMB:    freeMB,
-			ComputeUtil:      0, // 需要额外查询，暂不采集
+			ComputeUtil:      computeUtil,
 		})
 	}
 
@@ -101,6 +109,19 @@ func parseInt64(s string) int64 {
 		return 0
 	}
 	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// parseFloat64 安全解析 float64，解析失败返回 0
+func parseFloat64(s string) float64 {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "[N/A]" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(s, 64)
 	if err != nil {
 		return 0
 	}

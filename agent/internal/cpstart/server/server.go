@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"embed"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -40,7 +41,7 @@ func NewHTTPServer(cfg *cpstartcfg.Config, bridge *Bridge, runner *agent.Runner)
 	h = recoveryMiddleware(h)
 	h = localhostMiddleware(h)
 
-	addr := "127.0.0.1"
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Console.Port)
 	httpServer := &http.Server{
 		Addr:         addr,
 		Handler:      h,

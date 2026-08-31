@@ -33,7 +33,7 @@ export interface SetupStatus {
 export interface SetupConfig {
   scheduler?: { address?: string }
   agent?: { name?: string; data_dir?: string }
-  resources?: { max_cpu_cores?: number; max_memory_mb?: number }
+  resources?: { max_cpu_cores?: number; max_memory_mb?: number; report_gpu?: boolean }
   invite_code?: string
 }
 
@@ -52,6 +52,15 @@ export function getSetupCheck(): Promise<Record<string, boolean>> {
   return request<Record<string, boolean>>('/setup/check')
 }
 
+export interface SetupCheckResult {
+  scheduler: boolean
+  containerd: boolean
+  gpu: boolean
+  os: string
+  wsl_available: boolean
+  [key: string]: any
+}
+
 // ========== 本地状态 API ==========
 
 export interface LocalStatus {
@@ -63,6 +72,36 @@ export interface LocalStatus {
 
 export function getLocalStatus(): Promise<LocalStatus> {
   return request<LocalStatus>('/status')
+}
+
+// ========== 设置 API ==========
+
+export interface SettingsConfig {
+  agent_name: string
+  scheduler: string
+  max_cpu_cores: number
+  max_memory_mb: number
+  report_gpu: boolean
+  node_id: string
+  agent_status: string
+  data_dir: string
+}
+
+export interface ResourceSettings {
+  max_cpu_cores: number
+  max_memory_mb: number
+  report_gpu: boolean
+}
+
+export function getSettings(): Promise<SettingsConfig> {
+  return request<SettingsConfig>('/settings')
+}
+
+export function updateResourceSettings(settings: ResourceSettings): Promise<any> {
+  return request('/settings/resources', {
+    method: 'PUT',
+    body: JSON.stringify(settings),
+  })
 }
 
 // ========== 节点 API ==========
@@ -91,11 +130,12 @@ export interface NodeResources {
 }
 
 export interface GPUDevice {
-  id: string
-  name: string
-  memory_mb: number
+  uuid: string
+  model: string
+  memory_total_mb: number
   memory_used_mb: number
-  cores: number
+  memory_available_mb: number
+  compute_util: number
 }
 
 export function listNodes(): Promise<Node[]> {
@@ -202,4 +242,26 @@ export function redeemInviteCode(code: string, nodeID: string): Promise<any> {
     method: 'POST',
     body: JSON.stringify({ code, node_id: nodeID }),
   })
+}
+
+// ========== WSL2 自动配置 API ==========
+
+export interface WSL2StepState {
+  name: string
+  status: string
+  log?: string
+}
+
+export interface WSL2Status {
+  running: boolean
+  steps: WSL2StepState[]
+  error?: string
+}
+
+export function startWSL2Setup(): Promise<any> {
+  return request('/setup/wsl2/start', { method: 'POST' })
+}
+
+export function getWSL2Status(): Promise<WSL2Status> {
+  return request<WSL2Status>('/setup/wsl2/status')
 }

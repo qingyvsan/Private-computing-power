@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { getSetupStatus } from './api/client'
+import MainLayout from './components/layout/MainLayout.vue'
 
 const router = useRouter()
+const route = useRoute()
 const loading = ref(true)
+
+const isSetupRoute = computed(() => route.path === '/setup')
 
 onMounted(async () => {
   try {
@@ -28,7 +32,10 @@ onMounted(async () => {
       </el-icon>
       <p>Loading...</p>
     </div>
-    <router-view v-else />
+    <template v-else>
+      <MainLayout v-if="!isSetupRoute" />
+      <router-view v-else />
+    </template>
   </div>
 </template>
 

@@ -135,8 +135,8 @@ func run(configPath string) error {
 			MaxConnectionIdle:     0,
 			MaxConnectionAge:      0,
 			MaxConnectionAgeGrace: 0,
-			Time:                  10,
-			Timeout:               5,
+			Time:                  10 * time.Second,
+			Timeout:               5 * time.Second,
 		}),
 	)
 

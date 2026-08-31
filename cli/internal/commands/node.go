@@ -114,6 +114,34 @@ func printJSON(v interface{}) error {
 	return nil
 }
 
+// nodeUnregisterCmd 注销节点
+var nodeUnregisterCmd = &cobra.Command{
+	Use:   "unregister <node-id>",
+	Short: "注销并删除节点",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		c, err := client.New(client.Config{Address: schedulerAddr})
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+
+		reason, _ := cmd.Flags().GetString("reason")
+
+		resp, err := c.UnregisterNode(context.Background(), &pb.UnregisterNodeRequest{
+			NodeID: args[0],
+			Reason: reason,
+		})
+		if err != nil {
+			return fmt.Errorf("unregister node: %w", err)
+		}
+
+		fmt.Printf("Node %s unregistered (success=%v)\n", args[0], resp.Success)
+		return nil
+	},
+}
+
 func init() {
-	nodeCmd.AddCommand(nodeListCmd, nodeStatusCmd)
+	nodeCmd.AddCommand(nodeListCmd, nodeStatusCmd, nodeUnregisterCmd)
+	nodeUnregisterCmd.Flags().String("reason", "manual", "注销原因")
 }

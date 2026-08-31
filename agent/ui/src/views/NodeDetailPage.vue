@@ -71,11 +71,15 @@ function resourcePercent(used: number, total: number): number {
 
       <h3 v-if="node.resources?.gpus?.length" style="margin: 24px 0 16px;">GPU</h3>
       <el-table :data="node.resources?.gpus || []" stripe v-if="node.resources?.gpus?.length">
-        <el-table-column prop="name" label="名称" />
-        <el-table-column prop="cores" label="核心数" width="100" />
-        <el-table-column label="显存" width="200">
+        <el-table-column prop="model" label="名称" />
+        <el-table-column label="显存" width="180">
           <template #default="{ row }">
-            {{ formatBytes(row.memory_used_mb * 1024 * 1024) }} / {{ formatBytes(row.memory_mb * 1024 * 1024) }}
+            {{ formatBytes(row.memory_used_mb * 1024 * 1024) }} / {{ formatBytes(row.memory_total_mb * 1024 * 1024) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="利用率" width="100">
+          <template #default="{ row }">
+            {{ (row.compute_util || 0).toFixed(1) }}%
           </template>
         </el-table-column>
       </el-table>

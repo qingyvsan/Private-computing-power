@@ -36,6 +36,8 @@ type Agent struct {
 	exec      *executor.Executor
 	nebulaMgr *nebula.Manager
 	updater   *updater.Updater
+
+	onRegistered func(nodeID string) // 注册完成回调
 }
 
 // New 创建节点 Agent
@@ -53,7 +55,7 @@ func New(cfg *config.Config) (*Agent, error) {
 	a := &Agent{
 		cfg:       cfg,
 		nebulaMgr: nebulaMgr,
-		collector: heartbeat.NewCollector(cfg.Resources.ReportGPU, cfg.Resources.ReportNetwork, nebulaMgr),
+		collector: heartbeat.NewCollector(cfg.Resources.ReportGPU, cfg.Resources.ReportNetwork, nebulaMgr, cfg.Scheduler.Address),
 	}
 
 	// 初始化自动更新器
@@ -81,6 +83,16 @@ func New(cfg *config.Config) (*Agent, error) {
 	}
 
 	return a, nil
+}
+
+// NodeID 返回注册后的节点 ID
+func (a *Agent) NodeID() string {
+	return a.nodeID
+}
+
+// SetOnRegistered 设置注册完成回调
+func (a *Agent) SetOnRegistered(fn func(nodeID string)) {
+	a.onRegistered = fn
 }
 
 // Start 启动 Agent
@@ -195,6 +207,11 @@ func (a *Agent) register(ctx context.Context) (*pb.RegisterNodeResponse, error) 
 
 	a.nodeID = resp.NodeID
 	log.Printf("registered as node %s, overlay IP %s", resp.NodeID, resp.OverlayIP)
+
+	if a.onRegistered != nil {
+		a.onRegistered(resp.NodeID)
+	}
+
 	return resp, nil
 }
 

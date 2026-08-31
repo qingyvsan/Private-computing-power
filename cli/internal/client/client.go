@@ -135,3 +135,9 @@ func (c *Client) RedeemInviteCode(ctx context.Context, req *pb.RedeemInviteCodeR
 	defer cancel()
 	return c.api.RedeemInviteCode(ctx, req)
 }
+
+func (c *Client) UnregisterNode(ctx context.Context, req *pb.UnregisterNodeRequest) (*pb.UnregisterNodeResponse, error) {
+	ctx, cancel := c.ctx(ctx)
+	defer cancel()
+	return c.api.UnregisterNode(ctx, req)
+}

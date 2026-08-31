@@ -13,22 +13,22 @@ import (
 // Config cpstart 配置
 type Config struct {
 	Agent struct {
-		Name    string `yaml:"name"`
-		DataDir string `yaml:"data_dir"`
-	} `yaml:"agent"`
+		Name    string `json:"name" yaml:"name"`
+		DataDir string `json:"data_dir" yaml:"data_dir"`
+	} `json:"agent" yaml:"agent"`
 	Scheduler struct {
-		Address string `yaml:"address"`
-	} `yaml:"scheduler"`
+		Address string `json:"address" yaml:"address"`
+	} `json:"scheduler" yaml:"scheduler"`
 	Resources struct {
-		MaxCPUCores float64 `yaml:"max_cpu_cores"`
-		MaxMemoryMB int64   `yaml:"max_memory_mb"`
-		ReportGPU   bool    `yaml:"report_gpu"`
-	} `yaml:"resources"`
+		MaxCPUCores float64 `json:"max_cpu_cores" yaml:"max_cpu_cores"`
+		MaxMemoryMB int64   `json:"max_memory_mb" yaml:"max_memory_mb"`
+		ReportGPU   bool    `json:"report_gpu" yaml:"report_gpu"`
+	} `json:"resources" yaml:"resources"`
 	Console struct {
-		Port     int  `yaml:"port"`
-		AutoOpen bool `yaml:"auto_open"`
-	} `yaml:"console"`
-	InviteCode string `yaml:"invite_code"`
+		Port     int  `json:"port" yaml:"port"`
+		AutoOpen bool `json:"auto_open" yaml:"auto_open"`
+	} `json:"console" yaml:"console"`
+	InviteCode string `json:"invite_code" yaml:"invite_code"`
 }
 
 // Default 返回默认配置

@@ -161,6 +161,7 @@ type GPUDevice struct {
 	UUID            string  `json:"uuid,omitempty" yaml:"uuid,omitempty"`
 	Model           string  `json:"model,omitempty" yaml:"model,omitempty"`
 	MemoryTotalMB   int64   `json:"memory_total_mb,omitempty" yaml:"memory_total_mb,omitempty"`
+	MemoryUsedMB    int64   `json:"memory_used_mb,omitempty" yaml:"memory_used_mb,omitempty"`
 	MemoryAvailMB   int64   `json:"memory_available_mb,omitempty" yaml:"memory_available_mb,omitempty"`
 	ComputeUtil     float64 `json:"compute_util,omitempty" yaml:"compute_util,omitempty"`
 }
