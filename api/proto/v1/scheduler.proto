@@ -21,7 +21,7 @@ service Scheduler {
 
   // 任务分配 (调度器 -> Agent)
   rpc AssignUnit(AssignUnitRequest) returns (AssignUnitResponse);
-  rpc ReportUnitStatus(stream UnitStatusReport) returns (UnitStatusAck);
+  rpc ReportUnitStatus(stream UnitStatusReport) returns (stream UnitStatusAck);
 
   // 信任管理
   rpc DeclareTrust(DeclareTrustRequest) returns (DeclareTrustResponse);
@@ -74,6 +74,9 @@ message HeartbeatRequest {
 message HeartbeatResponse {
   int64 server_time = 1;
   repeated Command commands = 2;
+  NodeStatus node_status = 3;
+  double phi_value = 4;
+  string heartbeat_interval = 5;
 }
 
 message UnregisterNodeRequest {
@@ -134,17 +137,19 @@ message WatchJobRequest {
 // ========== 任务分配消息 ==========
 
 message AssignUnitRequest {
-  Unit unit = 1;
-  string image = 2;
-  ResourceSpec resources = 3;
-  map<string, string> env = 4;
-  repeated string mounts = 5;
-  GPUConfig gpu_config = 6;
+  string node_id = 1;
+  Unit unit = 2;
+  string image = 3;
+  ResourceSpec resources = 4;
+  map<string, string> env = 5;
+  repeated string mounts = 6;
+  GPUConfig gpu_config = 7;
 }
 
 message AssignUnitResponse {
   bool accepted = 1;
   string message = 2;
+  string unit_id = 3;
 }
 
 message UnitStatusReport {
@@ -163,9 +168,10 @@ message UnitStatusAck {
 // ========== 信任管理消息 ==========
 
 message DeclareTrustRequest {
-  string target_node_id = 1;
-  bytes signature = 2;
-  int64 expires_at = 3;
+  string from_node_id = 1;
+  string target_node_id = 2;
+  bytes signature = 3;
+  int64 expires_at = 4;
 }
 
 message DeclareTrustResponse {
@@ -173,8 +179,9 @@ message DeclareTrustResponse {
 }
 
 message RevokeTrustRequest {
-  string target_node_id = 1;
-  bytes signature = 2;
+  string from_node_id = 1;
+  string target_node_id = 2;
+  bytes signature = 3;
 }
 
 message RevokeTrustResponse {
@@ -201,8 +208,9 @@ message IssueCertRequest {
 
 message IssueCertResponse {
   bytes certificate = 1;
-  bytes ca_certificate = 2;
-  int64 expires_at = 3;
+  bytes private_key = 2;
+  bytes ca_certificate = 3;
+  int64 expires_at = 4;
 }
 
 message RenewCertRequest {
@@ -255,6 +263,7 @@ message ListNodesRequest {
   NodeStatus status_filter = 1;
   int32 page_size = 2;
   string page_token = 3;
+  string requester_id = 4;
 }
 
 message ListNodesResponse {
@@ -265,8 +274,44 @@ message ListNodesResponse {
 
 message GetNodeRequest {
   string node_id = 1;
+  string requester_id = 2;
 }
 
 message GetNodeResponse {
   Node node = 1;
+}
+
+// ========== WAL 同步 ==========
+
+service Sync {
+  rpc SyncWAL(SyncWALRequest) returns (stream SyncWALResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message SyncWALEntry {
+  uint64 sequence = 1;
+  uint32 type = 2;
+  string key = 3;
+  bytes data = 4;
+}
+
+message SyncWALRequest {
+  uint64 last_sequence = 1;
+  string standby_id = 2;
+}
+
+message SyncWALResponse {
+  repeated SyncWALEntry entries = 1;
+  bool more = 2;
+}
+
+message HealthCheckRequest {
+  int64 timestamp = 1;
+}
+
+message HealthCheckResponse {
+  int64 timestamp = 1;
+  string role = 2;
+  uint64 sequence = 3;
+  string leader_id = 4;
 }

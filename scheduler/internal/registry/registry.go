@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"encoding/json"
 	"log"
 	"sync"
 	"time"
@@ -144,7 +145,7 @@ func (r *Registry) Unregister(nodeID string) {
 }
 
 // ReportHeartbeat 记录心跳并根据 φ 值更新节点状态
-func (r *Registry) ReportHeartbeat(nodeID string, res *pb.NodeResources, runningUnits []string) {
+func (r *Registry) ReportHeartbeat(nodeID string, res *pb.NodeResources, capabilities []string, runningUnits []string) {
 	now := time.Now()
 
 	r.mu.Lock()
@@ -160,6 +161,9 @@ func (r *Registry) ReportHeartbeat(nodeID string, res *pb.NodeResources, running
 	n.LastHeartbeat = now.UnixMilli()
 	if res != nil {
 		n.Resources = res
+	}
+	if capabilities != nil {
+		n.Capabilities = capabilities
 	}
 	n.CurrentTasks = int32(len(runningUnits))
 
@@ -234,15 +238,17 @@ func (r *Registry) GetNode(nodeID string) *pb.Node {
 	if n == nil {
 		return nil
 	}
+	// 返回副本，避免在锁内修改原始对象（防止与持锁写入方竞争）
+	copy := cloneNode(n)
 	// 填充运行时 φ 值
 	now := time.Now()
 	phi := r.detector.Phi(nodeID, now)
-	n.PhiValue = phi
+	copy.PhiValue = phi
 	stats := r.detector.Stats(now)
 	if s, exists := stats[nodeID]; exists {
-		n.HeartbeatSampleCount = int32(s.SampleCount)
+		copy.HeartbeatSampleCount = int32(s.SampleCount)
 	}
-	return n
+	return copy
 }
 
 // ListOnline 列出所有可调度节点（Online + Busy）
@@ -254,14 +260,16 @@ func (r *Registry) ListOnline() []*pb.Node {
 	var result []*pb.Node
 	for id, n := range r.nodes {
 		if n.Status == pb.NodeStatusOnline || n.Status == pb.NodeStatusBusy {
+			// 返回副本，避免在锁内修改原始对象
+			cp := cloneNode(n)
 			// 填充运行时 φ 值
 			phi := r.detector.Phi(id, now)
-			n.PhiValue = phi
+			cp.PhiValue = phi
 			stats := r.detector.Stats(now)
 			if s, exists := stats[id]; exists {
-				n.HeartbeatSampleCount = int32(s.SampleCount)
+				cp.HeartbeatSampleCount = int32(s.SampleCount)
 			}
-			result = append(result, n)
+			result = append(result, cp)
 		}
 	}
 	return result
@@ -275,14 +283,16 @@ func (r *Registry) ListAll() []*pb.Node {
 
 	var result []*pb.Node
 	for id, n := range r.nodes {
+		// 返回副本，避免在锁内修改原始对象
+		cp := cloneNode(n)
 		// 填充运行时 φ 值
 		phi := r.detector.Phi(id, now)
-		n.PhiValue = phi
+		cp.PhiValue = phi
 		stats := r.detector.Stats(now)
 		if s, exists := stats[id]; exists {
-			n.HeartbeatSampleCount = int32(s.SampleCount)
+			cp.HeartbeatSampleCount = int32(s.SampleCount)
 		}
-		result = append(result, n)
+		result = append(result, cp)
 	}
 	return result
 }
@@ -353,4 +363,18 @@ type NodeStats struct {
 	PhiValue      float64
 	SampleCount   int
 	LastHeartbeat time.Time
+}
+
+// cloneNode 深拷贝节点对象，避免在锁内修改共享指针
+func cloneNode(n *pb.Node) *pb.Node {
+	data, err := json.Marshal(n)
+	if err != nil {
+		// Marshal 不应失败；失败时返回原始指针（仍持有锁，仅读安全）
+		return n
+	}
+	var cp pb.Node
+	if err := json.Unmarshal(data, &cp); err != nil {
+		return n
+	}
+	return &cp
 }

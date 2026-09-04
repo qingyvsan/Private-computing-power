@@ -21,6 +21,7 @@ type Reporter struct {
 	interval     time.Duration
 	jitter       time.Duration
 	runningUnits func() []string
+	caps         func() []string
 	commandHandler func(cmd *pb.Command)
 
 	// 运行时状态
@@ -49,6 +50,11 @@ func NewReporter(
 	}
 }
 
+// SetCapabilities 设置节点能力上报函数（例如容器运行时可用性）
+func (r *Reporter) SetCapabilities(caps func() []string) {
+	r.caps = caps
+}
+
 // Start 开始心跳上报（阻塞）
 func (r *Reporter) Start(ctx context.Context) error {
 	// 建立双向流
@@ -69,9 +75,12 @@ func (r *Reporter) Start(ctx context.Context) error {
 
 		res := r.collector.Collect()
 		req := &pb.HeartbeatRequest{
-			NodeID:      r.nodeID,
-			Resources:   res,
+			NodeID:       r.nodeID,
+			Resources:    res,
 			RunningUnits: r.runningUnits(),
+		}
+		if r.caps != nil {
+			req.Capabilities = r.caps()
 		}
 
 		if err := stream.Send(req); err != nil {

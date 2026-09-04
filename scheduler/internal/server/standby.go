@@ -108,12 +108,12 @@ func (s *Standby) syncOnce(ctx context.Context) {
 	}
 	s.mu.RUnlock()
 
-	// 获取当前序列号
-	lastSeq := s.store.GetLastSequence()
-
-	// 如果本地已有序列号，从下一个开始同步
-	reqSeq := lastSeq
-	if lastSeq > 0 {
+	// 使用本地上次已回放的序列号作为增量同步起点。
+	// 注意：备机不启用 WAL（回放时 SetReplaying(true)），store.GetLastSequence()
+	// 恒为 0，因此这里必须使用 lastSyncSeq 才能实现增量同步，
+	// 否则每次都会从 0 全量拉取，且主端无法得知备机进度。
+	reqSeq := s.lastSyncSeq
+	if reqSeq > 0 {
 		// 从 Primary 获取最新序列号
 		healthResp, err := s.client.HealthCheck(ctx, &pb.HealthCheckRequest{
 			Timestamp: time.Now().UnixMilli(),
@@ -124,7 +124,7 @@ func (s *Standby) syncOnce(ctx context.Context) {
 		}
 
 		// 如果已经同步到最新，跳过
-		if lastSeq >= healthResp.Sequence {
+		if reqSeq >= healthResp.Sequence {
 			return
 		}
 	}
@@ -153,8 +153,12 @@ func (s *Standby) syncOnce(ctx context.Context) {
 
 		for _, entry := range resp.Entries {
 			if err := replayEntry(s.store, entry); err != nil {
-				log.Printf("[standby] replay entry seq=%d key=%s: %v", entry.Sequence, entry.Key, err)
-				continue
+				// 回放失败立即中断本次同步，避免跳过该条目。
+				// 否则 lastSyncSeq 会被后续成功条目推进，主端将认为
+				// 备机已确认本条目并可能清理对应 WAL，导致数据永久丢失。
+				log.Printf("[standby] replay entry seq=%d key=%s failed, aborting sync: %v",
+					entry.Sequence, entry.Key, err)
+				return
 			}
 			if entry.Sequence > s.lastSyncSeq {
 				s.lastSyncSeq = entry.Sequence

@@ -162,6 +162,13 @@ export function getNode(id: string): Promise<Node> {
   return request<Node>(`/nodes/${id}`)
 }
 
+export function unregisterNode(id: string, reason?: string): Promise<any> {
+  return request(`/nodes/${id}/unregister`, {
+    method: 'POST',
+    body: JSON.stringify({ reason: reason || '' }),
+  })
+}
+
 // ========== 作业 API ==========
 
 export interface Job {
@@ -194,6 +201,7 @@ export interface Unit {
   error_message: string
   started_at: number
   completed_at: number
+  output?: string
 }
 
 export interface JobsListResponse {
@@ -274,12 +282,47 @@ export interface WSL2Status {
   error?: string
 }
 
-export function startWSL2Setup(): Promise<any> {
-  return request('/setup/wsl2/start', { method: 'POST' })
+export function startWSL2Setup(installPath?: string): Promise<any> {
+  const body: any = {}
+  if (installPath) body.install_path = installPath
+  return request('/setup/wsl2/start', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
 }
 
 export function getWSL2Status(): Promise<WSL2Status> {
   return request<WSL2Status>('/setup/wsl2/status')
+}
+
+export function getWSL2Config(): Promise<{
+  install_path: string
+  distro_name: string
+  containerd_socket: string
+}> {
+  return request('/setup/wsl2/config')
+}
+
+// ========== macOS 容器配置 API ==========
+
+export interface MacOSStepState {
+  name: string
+  status: string
+  log?: string
+}
+
+export interface MacOSStatus {
+  running: boolean
+  steps: MacOSStepState[]
+  error?: string
+}
+
+export function startMacOSSetup(): Promise<any> {
+  return request('/setup/macos/start', { method: 'POST' })
+}
+
+export function getMacOSStatus(): Promise<MacOSStatus> {
+  return request<MacOSStatus>('/setup/macos/status')
 }
 
 // ========== 项目文件 API ==========

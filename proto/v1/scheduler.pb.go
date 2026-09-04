@@ -9,6 +9,7 @@ type RegisterNodeRequest struct {
 	InviteCode         string         `json:"invite_code,omitempty" yaml:"invite_code,omitempty"`
 	Version            string         `json:"version,omitempty" yaml:"version,omitempty"`
 	InitialResources   *NodeResources `json:"initial_resources,omitempty" yaml:"initial_resources,omitempty"`
+	Capabilities       []string       `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
 }
 
 type RegisterNodeResponse struct {
@@ -25,6 +26,7 @@ type RegisterNodeResponse struct {
 type HeartbeatRequest struct {
 	NodeID      string         `json:"node_id,omitempty" yaml:"node_id,omitempty"`
 	Resources   *NodeResources `json:"resources,omitempty" yaml:"resources,omitempty"`
+	Capabilities []string       `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
 	RunningUnits []string      `json:"running_units,omitempty" yaml:"running_units,omitempty"`
 	UnitDeltas  []*Unit        `json:"unit_deltas,omitempty" yaml:"unit_deltas,omitempty"`
 }
@@ -166,6 +168,7 @@ type IssueCertRequest struct {
 
 type IssueCertResponse struct {
 	Certificate   []byte `json:"certificate,omitempty" yaml:"certificate,omitempty"`
+	PrivateKey    []byte `json:"private_key,omitempty" yaml:"private_key,omitempty"`
 	CACertificate []byte `json:"ca_certificate,omitempty" yaml:"ca_certificate,omitempty"`
 	ExpiresAt     int64  `json:"expires_at,omitempty" yaml:"expires_at,omitempty"`
 }

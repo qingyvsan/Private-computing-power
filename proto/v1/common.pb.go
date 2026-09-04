@@ -198,11 +198,12 @@ type NetworkRequirement struct {
 }
 
 type ResourceSpec struct {
-	CPUCores    float64              `json:"cpu_cores,omitempty" yaml:"cpu_cores,omitempty"`
-	MemoryBytes int64                `json:"memory_bytes,omitempty" yaml:"memory_bytes,omitempty"`
-	DiskBytes   int64                `json:"disk_bytes,omitempty" yaml:"disk_bytes,omitempty"`
-	GPUs        []*GPURequest        `json:"gpus,omitempty" yaml:"gpus,omitempty"`
-	Network     *NetworkRequirement  `json:"network,omitempty" yaml:"network,omitempty"`
+	CPUCores            float64              `json:"cpu_cores,omitempty" yaml:"cpu_cores,omitempty"`
+	MemoryBytes         int64                `json:"memory_bytes,omitempty" yaml:"memory_bytes,omitempty"`
+	DiskBytes           int64                `json:"disk_bytes,omitempty" yaml:"disk_bytes,omitempty"`
+	GPUs                []*GPURequest        `json:"gpus,omitempty" yaml:"gpus,omitempty"`
+	Network             *NetworkRequirement  `json:"network,omitempty" yaml:"network,omitempty"`
+	RequiredCapabilities []string             `json:"required_capabilities,omitempty" yaml:"required_capabilities,omitempty"`
 }
 
 // ========== 拆分策略 ==========
@@ -307,6 +308,7 @@ type Node struct {
 	PublicKey           []byte         `json:"public_key,omitempty" yaml:"public_key,omitempty"`
 	Status              NodeStatus     `json:"status,omitempty" yaml:"status,omitempty"`
 	Resources           *NodeResources `json:"resources,omitempty" yaml:"resources,omitempty"`
+	Capabilities        []string       `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
 	Version             string         `json:"version,omitempty" yaml:"version,omitempty"`
 	HardwareFingerprint string         `json:"hardware_fingerprint,omitempty" yaml:"hardware_fingerprint,omitempty"`
 	NATType             string         `json:"nat_type,omitempty" yaml:"nat_type,omitempty"`

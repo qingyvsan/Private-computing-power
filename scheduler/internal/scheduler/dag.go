@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"log"
+	"time"
 
 	pb "computing-power/proto/v1"
 	"computing-power/pkg/taskmodel"
@@ -46,6 +47,19 @@ func (e *Engine) scheduleWorkflow(job *pb.Job, units []*pb.Unit) {
 			protoStage.Status == pb.StageStatusSkipped {
 			continue
 		}
+		// 检查依赖是否失败 → 级联标记为 Skipped 并取消其 Unit
+		depFailed := false
+		for _, depName := range protoStage.DependsOn {
+			depStage := findStageByName(job.Stages, depName)
+			if depStage != nil && depStage.Status == pb.StageStatusFailed {
+				depFailed = true
+				break
+			}
+		}
+		if depFailed {
+			e.skipStageAndUnits(job, protoStage)
+			continue
+		}
 		// 检查依赖
 		depsMet := true
 		for _, depName := range protoStage.DependsOn {
@@ -67,6 +81,37 @@ func (e *Engine) scheduleWorkflow(job *pb.Job, units []*pb.Unit) {
 			job.ID, len(readyUnits))
 		e.assignUnits(readyUnits, job)
 	}
+}
+
+// skipStageAndUnits 将 Stage 标记为 Skipped 并取消其所有非终结 Unit
+// 用于工作流中上游 Stage 失败时的级联处理。
+func (e *Engine) skipStageAndUnits(job *pb.Job, stage *pb.Stage) {
+	if stage.Status == pb.StageStatusCompleted ||
+		stage.Status == pb.StageStatusFailed ||
+		stage.Status == pb.StageStatusSkipped {
+		return
+	}
+	stage.Status = pb.StageStatusSkipped
+	if err := e.store.UpdateStageStatus(stage.ID, pb.StageStatusSkipped); err != nil {
+		log.Printf("engine: skip stage %s: %v", stage.ID, err)
+	}
+
+	// 取消该 Stage 的所有非终结 Unit
+	units, err := e.store.ListUnitsByStage(stage.ID)
+	if err != nil {
+		log.Printf("engine: skip stage %s list units: %v", stage.ID, err)
+		return
+	}
+	for _, u := range units {
+		if u.Status == pb.UnitStatusPending || u.Status == pb.UnitStatusAssigned || u.Status == pb.UnitStatusRunning {
+			if _, err := e.store.UpdateUnitStatus(u.ID, pb.UnitStatusCancelled, 0, "upstream stage failed"); err != nil {
+				log.Printf("engine: skip stage %s cancel unit %s: %v", stage.ID, u.ID, err)
+			}
+		}
+	}
+	now := time.Now()
+	log.Printf("engine: stage %s (job %s) skipped due to upstream failure at %s",
+		stage.ID, job.ID, now.Format("15:04:05"))
 }
 
 // findStageByName 按名称查找 Stage

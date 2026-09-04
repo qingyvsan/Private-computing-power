@@ -6,14 +6,20 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	containerd "github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
+	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/oci"
+	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/errdefs"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // containerLogs 保存容器的 stdout/stderr 输出
@@ -39,32 +45,168 @@ type containerdRuntime struct {
 
 // NewRuntime 创建容器运行时
 // 返回 containerd 实现；如果不可用则返回错误
+// 在非 Linux 系统（如 macOS）上，会尝试多个候选 socket 路径
 func NewRuntime(socket, namespace string) (Runtime, error) {
-	if socket == "" {
-		socket = "/run/containerd/containerd.sock"
-	}
 	if namespace == "" {
 		namespace = "computing-power"
 	}
 
-	client, err := containerd.New(socket, containerd.WithDefaultNamespace(namespace))
+	// 构建候选 socket 路径列表
+	candidates := buildSocketCandidates(socket)
+
+	var lastErr error
+	for _, s := range candidates {
+		client, err := containerd.New(s, containerd.WithDefaultNamespace(namespace))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// 验证连通性
+		verCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, verErr := client.Version(verCtx)
+		cancel()
+		if verErr != nil {
+			client.Close()
+			lastErr = verErr
+			continue
+		}
+
+		log.Printf("container runtime connected via %s", s)
+		return &containerdRuntime{
+			client:    client,
+			socket:    s,
+			namespace: namespace,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("%w: connect to containerd (tried %d candidates): %v",
+		ErrRuntimeNotAvailable, len(candidates), lastErr)
+}
+
+// NewTCPRuntime 通过 TCP 连接 containerd（用于 Windows 经 WSL2 socat 代理访问）
+// addr 形如 "127.0.0.1:19090"。在 Windows 上，WSL2 自动将内部 TCP 端口暴露到 127.0.0.1。
+func NewTCPRuntime(addr, namespace string) (Runtime, error) {
+	if namespace == "" {
+		namespace = "computing-power"
+	}
+
+	log.Printf("connecting to containerd via TCP at %s", addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(ctx, addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+		grpc.FailOnNonTempDialError(true),
+		grpc.WithReturnConnectionError(),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("%w: connect to containerd: %v", ErrRuntimeNotAvailable, err)
+		return nil, fmt.Errorf("%w: dial tcp %s: %v", ErrRuntimeNotAvailable, addr, err)
+	}
+
+	client, err := containerd.NewWithConn(conn,
+		containerd.WithDefaultNamespace(namespace),
+		// Windows 宿主上的客户端默认请求 windows/amd64 平台，但 WSL2 containerd 提供的是
+		// Linux 容器镜像。显式固定 Linux 平台让镜像解析/拉取/解包一致。
+		containerd.WithDefaultPlatform(platforms.Only(platforms.MustParse("linux/amd64"))),
+	)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("%w: new client via tcp %s: %v", ErrRuntimeNotAvailable, addr, err)
 	}
 
 	// 验证连通性
 	verCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := client.Version(verCtx); err != nil {
+	_, verErr := client.Version(verCtx)
+	cancel()
+	if verErr != nil {
 		client.Close()
-		return nil, fmt.Errorf("%w: containerd not reachable: %v", ErrRuntimeNotAvailable, err)
+		return nil, fmt.Errorf("%w: verify tcp %s: %v", ErrRuntimeNotAvailable, addr, verErr)
 	}
 
+	log.Printf("container runtime connected via TCP %s", addr)
 	return &containerdRuntime{
 		client:    client,
-		socket:    socket,
+		socket:    addr,
 		namespace: namespace,
 	}, nil
+}
+
+// Backend 描述检测到的容器后端
+type Backend struct {
+	Type   string `json:"type"`   // containerd / colima / docker-desktop / orbstack / none
+	Socket string `json:"socket"` // 检测到的 socket 路径
+}
+
+// DetectBackend 检测当前系统可用的容器后端
+// Linux 上检查标准 containerd socket；macOS 上检查 Colima/Docker Desktop/OrbStack
+func DetectBackend() Backend {
+	linuxDefault := "/run/containerd/containerd.sock"
+
+	if runtime.GOOS == "linux" {
+		if fileExists(linuxDefault) {
+			return Backend{Type: "containerd", Socket: linuxDefault}
+		}
+		return Backend{Type: "none"}
+	}
+
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates := []struct {
+			name   string
+			socket string
+		}{
+			{"colima", home + "/.colima/default/containerd.sock"},
+			{"docker-desktop", home + "/.docker/run/containerd/containerd.sock"},
+			{"orbstack", home + "/.orbstack/run/docker.sock"},
+		}
+		for _, c := range candidates {
+			if fileExists(c.socket) {
+				return Backend{Type: c.name, Socket: c.socket}
+			}
+		}
+	}
+
+	return Backend{Type: "none"}
+}
+
+// buildSocketCandidates 返回要尝试的 containerd socket 路径列表
+// 在 macOS 上，Colima/Docker Desktop/OrbStack 的 socket 路径与 Linux 不同
+func buildSocketCandidates(configured string) []string {
+	var candidates []string
+
+	// Linux 标准路径（兜底）
+	linuxDefault := "/run/containerd/containerd.sock"
+
+	// 1. 优先使用配置的路径
+	if configured != "" {
+		candidates = append(candidates, configured)
+	} else {
+		candidates = append(candidates, linuxDefault)
+	}
+
+	// 2. 非 Linux 系统添加 macOS 容器后端候选路径
+	if runtime.GOOS != "linux" {
+		if home, err := os.UserHomeDir(); err == nil {
+			candidates = append(candidates,
+				home+"/.colima/default/containerd.sock",          // Colima
+				home+"/.docker/run/containerd/containerd.sock",   // Docker Desktop
+				home+"/.orbstack/run/docker.sock",                // OrbStack
+			)
+		}
+	}
+
+	// 去重，保持顺序
+	seen := make(map[string]bool)
+	var result []string
+	for _, p := range candidates {
+		if !seen[p] {
+			seen[p] = true
+			result = append(result, p)
+		}
+	}
+	return result
 }
 
 func (r *containerdRuntime) IsAvailable() bool {
@@ -80,9 +222,11 @@ func (r *containerdRuntime) IsAvailable() bool {
 func (r *containerdRuntime) PullImage(ctx context.Context, image string) error {
 	ctx = namespaces.WithNamespace(ctx, r.namespace)
 
+	image = normalizeImageRef(image)
 	log.Printf("pulling image: %s", image)
 	_, err := r.client.Pull(ctx, image,
 		containerd.WithPullUnpack,
+		containerd.WithPullSnapshotter("overlayfs"),
 		containerd.WithPullLabel("app", "computing-power"),
 	)
 	if err != nil {
@@ -92,12 +236,46 @@ func (r *containerdRuntime) PullImage(ctx context.Context, image string) error {
 	return nil
 }
 
+// normalizeImageRef 将简写镜像名规范化为完整引用，补全 docker.io/library/ 前缀。
+// containerd 的 reference.Parse 需要带 registry host 的完整引用，
+// 短名（如 "python:3.11-slim"）会导致解析失败。
+// 同时将 docker.io 替换为国内可用镜像源（docker.m.daocloud.io）。
+func normalizeImageRef(image string) string {
+	if image == "" || strings.Contains(image, "://") {
+		return image
+	}
+	// 去掉 tag 和 digest，判断是否已经包含 registry host（含 "." 或 ":" 或 单段官方镜像名）
+	base := image
+	if idx := strings.LastIndex(base, "@"); idx >= 0 {
+		base = base[:idx]
+	}
+	repo := base
+	if idx := strings.LastIndex(repo, ":"); idx >= 0 && !strings.Contains(repo[idx+1:], "/") {
+		repo = repo[:idx] // 去掉 :tag
+	}
+	first := repo
+	if idx := strings.Index(first, "/"); idx >= 0 {
+		first = first[:idx]
+	}
+	// 已经是完整引用（含 . 或 : 的 host，或带 / 的命名空间）则不改
+	if strings.Contains(first, ".") || strings.Contains(first, ":") || strings.Contains(repo, "/") {
+		// 即使是完整引用，如果 registry 是 docker.io 也替换为镜像源
+		if strings.HasPrefix(image, "docker.io/") {
+			return "docker.m.daocloud.io/" + strings.TrimPrefix(image, "docker.io/")
+		}
+		return image
+	}
+	// 否则补全官方镜像前缀（使用国内镜像源）
+	return "docker.m.daocloud.io/library/" + image
+}
+
 func (r *containerdRuntime) CreateContainer(ctx context.Context, spec *ContainerSpec) (string, error) {
 	ctx = namespaces.WithNamespace(ctx, r.namespace)
 
-	image, err := r.client.GetImage(ctx, spec.Image)
+	imageName := normalizeImageRef(spec.Image)
+	image, err := r.client.GetImage(ctx, imageName)
 	if err != nil {
-		return "", fmt.Errorf("get image %s: %w", spec.Image, err)
+		return "", fmt.Errorf("get image %s: %w", imageName, err)
 	}
 
 	containerID := spec.ID
@@ -141,10 +319,22 @@ func (r *containerdRuntime) CreateContainer(ctx context.Context, spec *Container
 		runtimeName = "io.containerd.kata.v2"
 	}
 
+	// 生成 OCI spec：Windows 宿主上默认生成 Windows spec（s.Linux == nil），
+	// 但 WSL2 的 runc 需要 Linux spec。显式指定 linux/amd64 平台生成。
+	ociSpec, err := oci.GenerateSpecWithPlatform(ctx, r.client, "linux/amd64",
+		&containers.Container{ID: containerID}, opts...)
+	if err != nil {
+		return "", fmt.Errorf("generate spec: %w", err)
+	}
+
 	_, err = r.client.NewContainer(ctx, containerID,
 		containerd.WithImage(image),
+		// 必须先设置 snapshotter，再创建快照。WithNewSnapshot 执行时读取
+		// c.Snapshotter，若为空则回退到客户端默认值（Windows 上为 "windows"），
+		// 导致 WSL2 containerd 返回 "snapshotter not loaded: windows"。
+		containerd.WithSnapshotter("overlayfs"),
 		containerd.WithNewSnapshot(containerID, image),
-		containerd.WithNewSpec(opts...),
+		containerd.WithSpec(ociSpec),
 		containerd.WithRuntime(runtimeName, nil),
 	)
 	if err != nil {
@@ -163,10 +353,10 @@ func (r *containerdRuntime) StartContainer(ctx context.Context, id string) error
 		return fmt.Errorf("load container %s: %w", id, err)
 	}
 
-	// 创建带日志捕获的 IO
-	logs := &containerLogs{}
-	r.logs.Store(id, logs)
-	task, err := container.NewTask(ctx, cio.NewCreator(cio.WithStreams(nil, logs, logs)))
+	// 使用 NullIO 避免跨平台命名管道问题：
+	// Windows 编译的客户端默认用 `\\.\pipe\...` 命名管道传递 IO，但 task 实际
+	// 跑在 WSL2 Linux containerd-shim 中，无法打开 Windows 命名管道。
+	task, err := container.NewTask(ctx, cio.NullIO)
 	if err != nil {
 		return fmt.Errorf("create task for %s: %w", id, err)
 	}
@@ -275,7 +465,7 @@ func (r *containerdRuntime) RemoveContainer(ctx context.Context, id string) erro
 		}
 	}
 
-	if err := container.Delete(ctx); err != nil {
+	if err := container.Delete(ctx, containerd.WithSnapshotCleanup); err != nil {
 		return fmt.Errorf("delete container %s: %w", id, err)
 	}
 

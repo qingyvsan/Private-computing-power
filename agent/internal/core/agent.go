@@ -100,6 +100,16 @@ func (a *Agent) SetOnRegistered(fn func(nodeID string)) {
 	a.onRegistered = fn
 }
 
+// SetRuntime 在 agent 运行中替换容器运行时（例如 WSL2 代理就绪后）。
+// 心跳 capability 闭包引用 a.runtime，替换后下次心跳自动上报 container 能力。
+func (a *Agent) SetRuntime(rt container.Runtime) {
+	a.runtime = rt
+	if a.exec != nil {
+		a.exec.SetRuntime(rt)
+	}
+	log.Printf("agent: container runtime updated")
+}
+
 // Start 启动 Agent
 func (a *Agent) Start(ctx context.Context) error {
 	// 构建 TLS 凭证
@@ -205,6 +215,13 @@ func (a *Agent) Start(ctx context.Context) error {
 		},
 		a.exec.HandleCommand,
 	)
+	// 心跳上报容器运行时能力（节点启动后运行时可能变为可用）
+	reporter.SetCapabilities(func() []string {
+		if a.runtime != nil && a.runtime.IsAvailable() {
+			return []string{"container"}
+		}
+		return nil
+	})
 
 	initial := parseDuration(a.cfg.Scheduler.ReconnectInitial, time.Second)
 	maxDelay := parseDuration(a.cfg.Scheduler.ReconnectMax, 60*time.Second)
@@ -227,6 +244,12 @@ func (a *Agent) register(ctx context.Context) (*pb.RegisterNodeResponse, error) 
 		HardwareFingerprint: hostname,
 		Version:             "0.1.0-dev",
 	}
+
+	// 上报容器运行时能力 + 初始资源
+	if a.runtime != nil && a.runtime.IsAvailable() {
+		req.Capabilities = []string{"container"}
+	}
+	req.InitialResources = a.collector.Collect()
 
 	resp, err := a.client.RegisterNode(ctx, req)
 	if err != nil {

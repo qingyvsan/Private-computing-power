@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,9 +20,12 @@ import (
 
 	"computing-power/pkg/version"
 
+	"computing-power/agent/internal/container"
 	cpstartagent "computing-power/agent/internal/cpstart/agent"
 	cpstartcfg "computing-power/agent/internal/cpstart/config"
+	"computing-power/agent/internal/cpstart/macos"
 	"computing-power/agent/internal/cpstart/server"
+	"computing-power/agent/internal/cpstart/wsl2"
 )
 
 func main() {
@@ -72,6 +76,89 @@ func run() error {
 		return fmt.Errorf("start http server: %v", err)
 	}
 
+	// WSL2 代理生命周期管理
+	var wsl2Proxy *wsl2.Proxy
+	var wsl2Mu sync.Mutex
+
+	// connectAgentRuntime 通过代理连接 containerd 并注入 agent
+	connectAgentRuntime := func(proxy *wsl2.Proxy) {
+		rt, err := container.NewTCPRuntime(proxy.Addr(), cfg.ContainerdNamespace())
+		if err != nil {
+			log.Printf("cpstart: connect containerd via proxy failed: %v", err)
+			return
+		}
+		runner.SetRuntime(rt)
+		log.Printf("cpstart: agent container runtime connected via WSL2 proxy %s", proxy.Addr())
+	}
+
+	// startWSL2Proxy 在给定发行版上启动 socat 代理并连接 agent
+	startWSL2Proxy := func(distro string) bool {
+		log.Printf("cpstart: starting WSL2 containerd proxy for %s", distro)
+		proxy := wsl2.NewProxy(wsl2.ProxyConfig{
+			Distro: distro,
+			Port:   cfg.WSL2.ProxyPort,
+			Socket: cfg.WSL2.ContainerdSocket,
+		})
+		proxyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := proxy.Start(proxyCtx); err != nil {
+			log.Printf("cpstart: WSL2 proxy start failed: %v", err)
+			return false
+		}
+		wsl2Mu.Lock()
+		wsl2Proxy = proxy
+		wsl2Mu.Unlock()
+		connectAgentRuntime(proxy)
+		return true
+	}
+
+	// 检查容器运行时可用性，如果不可用则自动触发环境配置
+	if backend := container.DetectBackend(); backend.Type == "none" {
+		if runtime.GOOS == "windows" && cfg.WSL2.Enabled {
+			// 获取 HTTP handler 持有的共享 automator 实例
+			auto := httpServer.Handler().WSL2Automator()
+
+			// OnReady：WSL2 配置完成后启动 socat 代理
+			auto.OnReady = func(distro string) { startWSL2Proxy(distro) }
+
+			// 快速路径：先尝试直接启动代理（WSL2 已配置好的场景）
+			fastCtx, fastCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			if proxy := wsl2.NewProxy(wsl2.ProxyConfig{Port: cfg.WSL2.ProxyPort, Socket: cfg.WSL2.ContainerdSocket}); proxy.Start(fastCtx) == nil {
+				fastCancel()
+				wsl2Mu.Lock()
+				wsl2Proxy = proxy
+				wsl2Mu.Unlock()
+				connectAgentRuntime(proxy)
+			} else {
+				fastCancel()
+				// 发行版不存在或 containerd 未装 → 触发完整 automator 安装
+				log.Printf("cpstart: WSL2 proxy not ready, auto-triggering WSL2 setup")
+				if err := auto.Start(); err != nil {
+					log.Printf("cpstart: WSL2 auto setup start failed: %v", err)
+				}
+			}
+		} else if runtime.GOOS == "darwin" {
+			log.Printf("cpstart: no container runtime detected, auto-triggering Colima setup")
+			macosAuto := macos.New()
+			if err := macosAuto.Start(); err != nil {
+				log.Printf("cpstart: auto macOS setup start failed: %v", err)
+			} else {
+				time.AfterFunc(5*time.Second, func() {
+					status := macosAuto.Status()
+					if !status.Running && status.Error != "" {
+						log.Printf("cpstart: macOS auto setup failed: %s", status.Error)
+					} else if !status.Running {
+						log.Printf("cpstart: macOS auto setup completed")
+					} else {
+						log.Printf("cpstart: macOS auto setup in progress (check UI for details)")
+					}
+				})
+			}
+		}
+	} else {
+		log.Printf("cpstart: container runtime detected: %s (%s)", backend.Type, backend.Socket)
+	}
+
 	// 打开浏览器（如果配置了自动打开且不在 WSL2 中）
 	url := fmt.Sprintf("http://127.0.0.1:%d", cfg.Console.Port)
 	if cfg.Console.AutoOpen {
@@ -96,6 +183,26 @@ func run() error {
 	// 优雅关闭
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	// 停止 WSL2 代理
+	wsl2Mu.Lock()
+	if wsl2Proxy != nil && wsl2Proxy.IsRunning() {
+		log.Printf("cpstart: stopping WSL2 containerd proxy")
+		wsl2Proxy.Stop()
+	}
+	proxyDistro := ""
+	if wsl2Proxy != nil {
+		proxyDistro = wsl2Proxy.Distro()
+	}
+	wsl2Mu.Unlock()
+
+	// 关闭 WSL2 发行版（连带关闭 containerd 等所有进程）
+	if proxyDistro != "" {
+		log.Printf("cpstart: terminating WSL2 distro %s", proxyDistro)
+		if err := exec.CommandContext(shutdownCtx, "wsl.exe", "--terminate", proxyDistro).Run(); err != nil {
+			log.Printf("cpstart: wsl --terminate warning: %v", err)
+		}
+	}
 
 	runner.Stop()
 	runner.Wait()

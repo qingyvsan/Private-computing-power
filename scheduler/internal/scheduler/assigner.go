@@ -64,6 +64,9 @@ func (e *Engine) assignUnits(units []*pb.Unit, job *pb.Job) {
 
 		spec := getResourceSpecForUnit(unit, job)
 
+		// 对于需要容器运行时的作业，设置能力要求
+		spec = withContainerCapability(spec, job)
+
 		// 获取候选节点
 		allNodes := e.registry.ListOnline()
 		if len(allNodes) == 0 {
@@ -170,6 +173,21 @@ func getResourceSpecForUnit(unit *pb.Unit, job *pb.Job) *pb.ResourceSpec {
 	return job.Resources
 }
 
+// withContainerCapability 为容器作业的资源规格附加 "container" 能力要求。
+// 本系统的所有作业都通过容器执行，因此调度时必须排除无容器运行时的节点。
+// 返回副本，避免修改 store 中的原始 spec。
+func withContainerCapability(spec *pb.ResourceSpec, job *pb.Job) *pb.ResourceSpec {
+	if job.Image == "" && job.BaseImage == "" {
+		return spec
+	}
+	cp := &pb.ResourceSpec{}
+	if spec != nil {
+		*cp = *spec
+	}
+	cp.RequiredCapabilities = append(cp.RequiredCapabilities, "container")
+	return cp
+}
+
 // ========== pull 分发（AssignUnit RPC） ==========
 
 // AssignToNode 为指定节点分配最优的 Pending Unit（pull 模式）
@@ -206,6 +224,7 @@ func (e *Engine) AssignToNode(nodeID string) (*pb.Unit, error) {
 		}
 
 		spec := getResourceSpecForUnit(unit, job)
+		spec = withContainerCapability(spec, job)
 		if !e.nodePassesFilter(node, spec, job.OwnerID, job.AllowSelfAssignment) {
 			continue
 		}
@@ -238,6 +257,10 @@ func (e *Engine) nodePassesFilter(node *pb.Node, spec *pb.ResourceSpec, ownerID 
 		return false
 	}
 	if spec != nil && node.Resources != nil && !resource.Fits(node.Resources, spec) {
+		return false
+	}
+	// 能力检查
+	if spec != nil && len(spec.RequiredCapabilities) > 0 && !hasAllCapabilities(node.Capabilities, spec.RequiredCapabilities) {
 		return false
 	}
 	if ownerID != "" && node.ID == ownerID && !allowSelfAssignment {
@@ -273,7 +296,14 @@ func (e *Engine) isStageReady(job *pb.Job, stageID string) bool {
 	}
 	for _, depName := range stage.DependsOn {
 		depStage := findStageByName(job.Stages, depName)
-		if depStage == nil || depStage.Status != pb.StageStatusCompleted {
+		if depStage == nil {
+			return false
+		}
+		// 上游失败 → 当前 stage 不可能继续执行
+		if depStage.Status == pb.StageStatusFailed {
+			return false
+		}
+		if depStage.Status != pb.StageStatusCompleted {
 			return false
 		}
 	}

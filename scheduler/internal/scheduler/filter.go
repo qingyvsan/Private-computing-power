@@ -11,10 +11,11 @@ type Candidate struct {
 	Score float64
 }
 
-// Filter 执行完整过滤管线：在线 → 资源 → 信任 → 黑名单
+// Filter 执行完整过滤管线：在线 → 资源 → 能力 → 信任 → 黑名单
 func (e *Engine) Filter(nodes []*pb.Node, spec *pb.ResourceSpec, ownerID string, allowSelfAssignment bool) []*pb.Node {
 	nodes = e.filterOnline(nodes)
 	nodes = e.filterResources(nodes, spec)
+	nodes = e.filterCapabilities(nodes, spec)
 	nodes = e.filterTrust(nodes, ownerID, allowSelfAssignment)
 	nodes = e.filterBlocklist(nodes, ownerID)
 	return nodes
@@ -46,6 +47,43 @@ func (e *Engine) filterResources(nodes []*pb.Node, spec *pb.ResourceSpec) []*pb.
 		}
 	}
 	return result
+}
+
+// filterCapabilities 保留满足能力要求的节点（如需要容器运行时）
+func (e *Engine) filterCapabilities(nodes []*pb.Node, spec *pb.ResourceSpec) []*pb.Node {
+	if spec == nil || len(spec.RequiredCapabilities) == 0 || len(nodes) == 0 {
+		return nodes
+	}
+	result := make([]*pb.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if hasAllCapabilities(n.Capabilities, spec.RequiredCapabilities) {
+			result = append(result, n)
+		}
+	}
+	return result
+}
+
+// hasAllCapabilities 检查节点是否拥有所有必需能力。
+// 如果节点未上报能力（Capabilities 为 nil），视为向后兼容的老节点，默认有所有能力。
+// 只有当节点显式上报了空列表（[]string{}）时，才视为无此能力。
+func hasAllCapabilities(have, need []string) bool {
+	if len(need) == 0 {
+		return true
+	}
+	// 节点未上报能力 → 老节点，默认有所有能力（向后兼容）
+	if have == nil {
+		return true
+	}
+	haveSet := make(map[string]bool, len(have))
+	for _, c := range have {
+		haveSet[c] = true
+	}
+	for _, c := range need {
+		if !haveSet[c] {
+			return false
+		}
+	}
+	return true
 }
 
 // filterTrust 保留 owner 信任可达的节点（owner 自身节点仅在 allowSelfAssignment=true 时通过）

@@ -63,6 +63,12 @@ func NewExecutor(rt container.Runtime, mgr *Manager, rep *Reporter, hamiMgr *con
 	}
 }
 
+// SetRuntime 替换容器运行时（例如 WSL2 代理就绪后）
+// handleAssign 每次都会检查 e.runtime.IsAvailable()，替换后即可接收容器作业。
+func (e *Executor) SetRuntime(rt container.Runtime) {
+	e.runtime = rt
+}
+
 // HandleCommand 处理调度器命令（非阻塞）
 // 由心跳 reporter 的 processResponse 调用
 func (e *Executor) HandleCommand(cmd *pb.Command) {
@@ -111,7 +117,13 @@ func (e *Executor) executeUnit(ap AssignPayload) {
 	// 2. 处理项目下载（如果存在项目）
 	projectDir := ""
 	if ap.ProjectID != "" {
-		projectDir, _ = e.downloadProject(ctx, ap)
+		var err error
+		projectDir, err = e.downloadProject(ctx, ap)
+		if err != nil {
+			log.Printf("executor: download project for unit %s: %v", ap.UnitID, err)
+			e.reporter.Report(ap.UnitID, pb.UnitStatusFailed, 0, "download project: "+err.Error(), nil)
+			return
+		}
 	}
 
 	// 3. 确定使用的镜像
@@ -170,6 +182,8 @@ func (e *Executor) executeUnit(ap AssignPayload) {
 		log.Printf("executor: start container for unit %s: %v", ap.UnitID, err)
 		e.reporter.Report(ap.UnitID, pb.UnitStatusFailed, 0, "start container: "+err.Error(), nil)
 		e.manager.Remove(ap.UnitID)
+		// 清理容器和快照，避免快照名占留给重试
+		e.cleanupContainer(containerID)
 		return
 	}
 

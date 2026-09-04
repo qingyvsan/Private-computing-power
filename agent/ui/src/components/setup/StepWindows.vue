@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { startWSL2Setup, getWSL2Status } from '../../api/client'
+import { ref, computed, onMounted } from 'vue'
+import { startWSL2Setup, getWSL2Status, getWSL2Config } from '../../api/client'
 import type { WSL2Status } from '../../api/client'
 
 const props = defineProps<{
@@ -23,6 +23,15 @@ const setupRunning = ref(false)
 const setupDone = ref(false)
 const setupError = ref('')
 const pollTimer = ref<ReturnType<typeof setInterval> | null>(null)
+const wslInstallPath = ref('')
+
+// 加载 WSL2 配置（获取当前安装目录等）
+onMounted(async () => {
+  try {
+    const cfg = await getWSL2Config()
+    if (cfg.install_path) wslInstallPath.value = cfg.install_path
+  } catch {}
+})
 
 // 整体进度
 const progressPercent = computed(() => {
@@ -41,7 +50,7 @@ async function startSetup() {
   emit('update:busy', true)
 
   try {
-    await startWSL2Setup()
+    await startWSL2Setup(wslInstallPath.value || undefined)
     // 开始轮询状态
     pollTimer.value = setInterval(pollStatus, 2000)
     // 立即轮询一次
@@ -130,6 +139,11 @@ function stepStatusType(status: string): string {
         <p style="color: #606266; margin: 16px 0; line-height: 1.6;">
           Windows 原生不支持 containerd。点击下方按钮自动配置 WSL2 容器运行时环境。
         </p>
+        <el-form-item label="WSL2 安装目录 (可选)" style="margin-bottom: 16px; text-align: left;">
+          <el-input v-model="wslInstallPath" placeholder="默认: C:\Users\用户名\wsl\Ubuntu-24.04" clearable>
+            <template #prefix><el-icon><FolderOpened /></el-icon></template>
+          </el-input>
+        </el-form-item>
         <el-button type="primary" size="large" @click="startSetup">
           一键配置 WSL2 环境
         </el-button>

@@ -571,7 +571,7 @@ func TestRegisterNode_WithAdminKey(t *testing.T) {
 func TestRegisterNode_DuplicateFingerprint(t *testing.T) {
 	srv := newTestServer(t)
 	// 注册第一个节点
-	_, err := srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
+	firstResp, err := srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
 		Name:                "node-1",
 		HardwareFingerprint: "abc-123",
 	})
@@ -587,13 +587,16 @@ func TestRegisterNode_DuplicateFingerprint(t *testing.T) {
 		t.Fatalf("CreateInviteCode: %v", err)
 	}
 
-	// 使用相同硬件指纹注册应失败
-	_, err = srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
+	// 使用相同硬件指纹注册应幂等成功（复用原有节点）
+	resp, err := srv.RegisterNode(context.Background(), &pb.RegisterNodeRequest{
 		Name:                "node-2",
 		InviteCode:          inviteResp.Code,
 		HardwareFingerprint: "abc-123",
 	})
-	if err == nil {
-		t.Fatal("expected error for duplicate hardware fingerprint")
+	if err != nil {
+		t.Fatalf("re-register with same fingerprint: %v", err)
+	}
+	if resp.NodeID != firstResp.NodeID {
+		t.Fatalf("expected re-registered node ID %q, got %q", firstResp.NodeID, resp.NodeID)
 	}
 }

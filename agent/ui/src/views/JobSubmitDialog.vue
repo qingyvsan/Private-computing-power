@@ -55,15 +55,26 @@ async function handleSubmit() {
       submitting.value = true
       const jobPayload: any = {
         name: name.value.trim(),
-        type: 'container',
+        type: 1, // JOB_TYPE_SINGLE
         allow_self_assignment: allowSelfAssignment.value,
         project_id: meta.project_id,
         startup_command: projectStartupCommand.value.trim(),
         base_image: projectBaseImage.value,
         resources: {
           cpu_cores: cpuCores.value,
-          memory_mb: memoryMB.value,
+          memory_bytes: memoryMB.value * 1024 * 1024,
         },
+        // 添加默认单 stage，调度器据此创建 unit
+        stages: [
+          {
+            name: 'run',
+            max_concurrency: 1,
+            resources: {
+              cpu_cores: cpuCores.value,
+              memory_bytes: memoryMB.value * 1024 * 1024,
+            },
+          },
+        ],
       }
       await submitJob(jobPayload)
       ElMessage.success('作业已提交')
@@ -79,13 +90,15 @@ async function handleSubmit() {
   // 普通模式
   submitting.value = true
   try {
+    // 映射作业类型到 protobuf 枚举值（0=未指定, 1=单作业, 2=聚合, 3=工作流）
+    const typeMap: Record<string, number> = { container: 1, custom: 1 }
     const jobPayload: any = {
       name: name.value.trim(),
-      type: type.value,
+      type: typeMap[type.value] ?? 1,
       allow_self_assignment: allowSelfAssignment.value,
     }
     if (image.value) jobPayload.image = image.value.trim()
-    if (command.value.trim()) jobPayload.command = command.value.trim()
+    if (command.value.trim()) jobPayload.startup_command = command.value.trim()
     if (envVars.value.trim()) {
       jobPayload.env = envVars.value.split('\n').filter(Boolean).map((line: string) => {
         const idx = line.indexOf('=')
@@ -95,8 +108,19 @@ async function handleSubmit() {
     }
     jobPayload.resources = {
       cpu_cores: cpuCores.value,
-      memory_mb: memoryMB.value,
+      memory_bytes: memoryMB.value * 1024 * 1024,
     }
+    // 添加默认单 stage，调度器据此创建 unit
+    jobPayload.stages = [
+      {
+        name: 'run',
+        max_concurrency: 1,
+        resources: {
+          cpu_cores: cpuCores.value,
+          memory_bytes: memoryMB.value * 1024 * 1024,
+        },
+      },
+    ]
     await submitJob(jobPayload)
     ElMessage.success('作业已提交')
     router.push('/jobs')

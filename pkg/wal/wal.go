@@ -89,6 +89,14 @@ func (w *Writer) LastSequence() uint64 {
 	return w.entrySeq
 }
 
+// CurrentFileSeq 返回当前写入的 WAL 文件序号
+// 用于安全清理：Checkpointer 不应删除当前活动文件。
+func (w *Writer) CurrentFileSeq() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.sequence
+}
+
 // Dir 返回 WAL 目录
 func (w *Writer) Dir() string {
 	return w.dir
@@ -283,6 +291,45 @@ func (r *Reader) ReadFrom(seq uint64) ([]*Entry, error) {
 		}
 	}
 	return result, nil
+}
+
+// FileRange 记录单个 WAL 文件覆盖的条目序号范围
+type FileRange struct {
+	Path   string
+	MinSeq uint64
+	MaxSeq uint64
+}
+
+// FileRanges 返回每个 WAL 文件覆盖的条目序号范围
+// 用于安全清理：仅删除所有条目序号都不超过清理边界的文件。
+func (r *Reader) FileRanges() ([]FileRange, error) {
+	var ranges []FileRange
+	for _, path := range r.files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read WAL file %s: %w", path, err)
+		}
+		fr := FileRange{Path: path}
+		offset := 0
+		for offset < len(data) {
+			entry, err := UnmarshalWAL(data[offset:])
+			if err != nil {
+				// 文件末尾截断或损坏，忽略剩余部分
+				break
+			}
+			if fr.MinSeq == 0 || entry.Sequence < fr.MinSeq {
+				fr.MinSeq = entry.Sequence
+			}
+			if entry.Sequence > fr.MaxSeq {
+				fr.MaxSeq = entry.Sequence
+			}
+			offset += 1 + 8 + 8 + 2 + len(entry.Key) + 4 + len(entry.Data) + 4 + 4
+		}
+		if fr.MaxSeq > 0 {
+			ranges = append(ranges, fr)
+		}
+	}
+	return ranges, nil
 }
 
 // Close 关闭读取器

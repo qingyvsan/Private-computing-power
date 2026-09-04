@@ -220,6 +220,9 @@ message Node {
   int32 current_tasks = 14;
   int32 max_tasks = 15;
   double reputation = 16;
+  string hardware_fingerprint = 17;
+  double phi_value = 18;
+  int32 heartbeat_sample_count = 19;
 }
 
 // ========== 调度命令 ==========

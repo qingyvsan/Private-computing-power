@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -129,6 +130,17 @@ func (s *Server) Start(ctx context.Context, listen string, grpcServer *grpc.Serv
 
 // RegisterNode 注册新节点
 func (s *Server) RegisterNode(ctx context.Context, req *pb.RegisterNodeRequest) (*pb.RegisterNodeResponse, error) {
+	// 硬件指纹检查：已注册节点直接复用原有记录，跳过邀请码
+	if req.HardwareFingerprint != "" {
+		existing, err := s.store.GetNodeByFingerprint(req.HardwareFingerprint)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "check fingerprint: %v", err)
+		}
+		if existing != nil {
+			return s.reRegisterNode(ctx, existing, req)
+		}
+	}
+
 	nodeID := generateNodeID(req.Name)
 
 	// 邀请码 / AdminKey / 冷启动验证
@@ -140,8 +152,7 @@ func (s *Server) RegisterNode(ctx context.Context, req *pb.RegisterNodeRequest) 
 	overlayIP, err := s.ipam.Allocate(nodeID)
 	if err != nil {
 		log.Printf("ipam allocate for %s: %v", nodeID, err)
-		// IPAM 失败时使用占位 IP（不影响节点注册）
-		overlayIP = "0.0.0.0"
+		return nil, status.Errorf(codes.Internal, "allocate overlay IP for %s: %v", nodeID, err)
 	}
 
 	// 签发 Nebula 证书（如果 CA 可用）
@@ -187,6 +198,7 @@ func (s *Server) RegisterNode(ctx context.Context, req *pb.RegisterNodeRequest) 
 		HardwareFingerprint: req.HardwareFingerprint,
 		Version:             req.Version,
 		Resources:           req.InitialResources,
+		Capabilities:        req.Capabilities,
 		Status:              pb.NodeStatusOnline,
 		Discoverable:        "public",
 		RegisteredAt:        time.Now().UnixMilli(),
@@ -212,19 +224,129 @@ func (s *Server) RegisterNode(ctx context.Context, req *pb.RegisterNodeRequest) 
 	}, nil
 }
 
+// reRegisterNode 处理已注册节点的重新注册：复用原有 nodeID 和 IP，更新资源/capabilities。
+func (s *Server) reRegisterNode(ctx context.Context, existing *pb.Node, req *pb.RegisterNodeRequest) (*pb.RegisterNodeResponse, error) {
+	nodeID := existing.ID
+	overlayIP := existing.OverlayIP
+
+	// 签发 Nebula 证书（如果 CA 可用）
+	var nebulaCert, nebulaKey, caCert []byte
+	var nebulaConfig string
+	if s.ca != nil && s.ca.IsCAValid() {
+		ip := net.ParseIP(overlayIP)
+		ips := []net.IP{}
+		if ip != nil {
+			ips = append(ips, ip)
+		}
+		cert, key, err := s.ca.IssueNodeCert(nodeID, []string{"default"}, ips)
+		if err == nil {
+			nebulaCert = cert
+			nebulaKey = key
+			caCert = s.ca.CACertPEM()
+			nebulaConfig = s.buildNebulaConfig(overlayIP)
+		} else {
+			log.Printf("issue nebula cert for %s: %v", nodeID, err)
+		}
+	}
+
+	// 签发 gRPC mTLS 客户端证书（如果 gRPC CA 可用）
+	var grpcCert, grpcKey []byte
+	if s.grpcCA != nil && s.grpcCA.IsCAValid() {
+		cert, key, err := s.grpcCA.IssueClientCert(nodeID)
+		if err == nil {
+			grpcCert = cert
+			grpcKey = key
+			if len(caCert) == 0 {
+				caCert = s.grpcCA.CACertPEM()
+			}
+		} else {
+			log.Printf("issue gRPC client cert for %s: %v", nodeID, err)
+		}
+	}
+
+	// 更新节点信息（保留原有 ID、IP、信任评分等）
+	node := &pb.Node{
+		ID:                  nodeID,
+		Name:                req.Name,
+		OverlayIP:           overlayIP,
+		PublicKey:           req.PublicKey,
+		HardwareFingerprint: req.HardwareFingerprint,
+		Version:             req.Version,
+		Resources:           req.InitialResources,
+		Capabilities:        req.Capabilities,
+		Status:              pb.NodeStatusOnline,
+		Discoverable:        existing.Discoverable,
+		RegisteredAt:        existing.RegisteredAt,
+		Reputation:          existing.Reputation,
+		MaxTasks:            existing.MaxTasks,
+	}
+
+	s.registry.Register(node)
+	if err := s.store.SaveNode(node); err != nil {
+		return nil, status.Errorf(codes.Internal, "save node: %v", err)
+	}
+
+	log.Printf("node re-registered: %s (%s) version %s overlay %s", nodeID, req.Name, req.Version, overlayIP)
+	return &pb.RegisterNodeResponse{
+		NodeID:             nodeID,
+		OverlayIP:          overlayIP,
+		NebulaCertificate:  nebulaCert,
+		NebulaPrivateKey:   nebulaKey,
+		NebulaConfig:       nebulaConfig,
+		CACertificate:      caCert,
+		GrpcCertificate:    grpcCert,
+		GrpcPrivateKey:     grpcKey,
+	}, nil
+}
+
 // UnregisterNode 注销节点
 func (s *Server) UnregisterNode(ctx context.Context, req *pb.UnregisterNodeRequest) (*pb.UnregisterNodeResponse, error) {
+	// 0. 回收该节点上的所有 Unit（防止 orphan unit 永久卡死）
+	s.reclaimNodeUnits(req.NodeID)
+
+	// 1. 从注册表中移除节点
 	s.registry.Unregister(req.NodeID)
+
+	// 2. 释放 IPAM
 	if s.ipam != nil {
 		if err := s.ipam.Release(req.NodeID); err != nil {
 			log.Printf("ipam release for %s: %v", req.NodeID, err)
 		}
 	}
+
+	// 3. 从持久化存储中删除节点
 	if err := s.store.DeleteNode(req.NodeID); err != nil {
 		log.Printf("store delete node %s: %v", req.NodeID, err)
 	}
+
+	// 4. 触发调度（回收后可能有新 unit 可分配）
+	s.engine.ScheduleNow()
+
 	log.Printf("node unregistered: %s reason: %s", req.NodeID, req.Reason)
 	return &pb.UnregisterNodeResponse{Success: true}, nil
+}
+
+// reclaimNodeUnits 回收分配给指定节点的所有 Unit，标记为 Failed
+// 被回收的 Unit 随后可被调度引擎的 retry 机制重新分配。
+func (s *Server) reclaimNodeUnits(nodeID string) {
+	units, err := s.store.ListUnitsByNodeID(nodeID)
+	if err != nil {
+		log.Printf("reclaim node %s units: list: %v", nodeID, err)
+		return
+	}
+	reclaimed := 0
+	for _, u := range units {
+		if u.Status == pb.UnitStatusAssigned || u.Status == pb.UnitStatusRunning {
+			if _, err := s.store.UpdateUnitStatus(u.ID, pb.UnitStatusFailed, 0, "node unregistered"); err != nil {
+				log.Printf("reclaim node %s unit %s: %v", nodeID, u.ID, err)
+				continue
+			}
+			reclaimed++
+		}
+	}
+	if reclaimed > 0 {
+		log.Printf("reclaimed %d units from unregistered node %s", reclaimed, nodeID)
+	}
 }
 
 // Heartbeat 心跳双向流
@@ -238,7 +360,7 @@ func (s *Server) Heartbeat(stream pb.Scheduler_HeartbeatServer) error {
 			return err
 		}
 
-		s.registry.ReportHeartbeat(req.NodeID, req.Resources, req.RunningUnits)
+		s.registry.ReportHeartbeat(req.NodeID, req.Resources, req.Capabilities, req.RunningUnits)
 
 		// 获取节点当前状态和 φ 值
 		now := time.Now()
@@ -352,13 +474,55 @@ func (s *Server) ListJobs(ctx context.Context, req *pb.ListJobsRequest) (*pb.Lis
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "list jobs: %v", err)
 	}
-	return &pb.ListJobsResponse{
-		Jobs:       jobs,
-		TotalCount: int32(len(jobs)),
-	}, nil
-}
 
-// CancelJob 取消作业（级联取消所有 Unit 和 Stage）
+	// 按 StatusFilter 过滤
+	if req.StatusFilter != pb.JobStatusUnspecified {
+		filtered := make([]*pb.Job, 0, len(jobs))
+		for _, j := range jobs {
+			if j.Status == req.StatusFilter {
+				filtered = append(filtered, j)
+			}
+		}
+		jobs = filtered
+	}
+
+	// 分页
+	offset := 0
+	if req.PageToken != "" {
+		decoded, err := base64.StdEncoding.DecodeString(req.PageToken)
+		if err == nil {
+			fmt.Sscanf(string(decoded), "%d", &offset)
+		}
+	}
+	pageSize := int(req.PageSize)
+	if pageSize <= 0 {
+		pageSize = 50 // 默认每页 50 条
+	}
+	if pageSize > 200 {
+		pageSize = 200 // 上限 200 条
+	}
+
+	end := offset + pageSize
+	if end > len(jobs) {
+		end = len(jobs)
+	}
+	if offset > len(jobs) {
+		offset = len(jobs)
+	}
+
+	page := jobs[offset:end]
+
+	var nextPageToken string
+	if end < len(jobs) {
+		nextPageToken = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d", end)))
+	}
+
+	return &pb.ListJobsResponse{
+		Jobs:          page,
+		TotalCount:    int32(len(jobs)),
+		NextPageToken: nextPageToken,
+	}, nil
+}// CancelJob 取消作业（级联取消所有 Unit 和 Stage）
 func (s *Server) CancelJob(ctx context.Context, req *pb.CancelJobRequest) (*pb.CancelJobResponse, error) {
 	// 加载作业
 	job, err := s.store.GetJob(req.JobID)
@@ -383,14 +547,18 @@ func (s *Server) CancelJob(ctx context.Context, req *pb.CancelJobRequest) (*pb.C
 	}
 
 	// 更新所有 Stage 状态为 CANCELLED
-	for _, stage := range job.Stages {
-		if stage.Status != pb.StageStatusCompleted && stage.Status != pb.StageStatusFailed {
-			stage.Status = pb.StageStatusSkipped
+	for i := range job.Stages {
+		if job.Stages[i].Status != pb.StageStatusCompleted && job.Stages[i].Status != pb.StageStatusFailed {
+			job.Stages[i].Status = pb.StageStatusSkipped
 		}
 	}
 
-	// 更新作业状态
-	if err := s.store.UpdateJobStatus(req.JobID, pb.JobStatusCancelled); err != nil {
+	// 更新作业状态（使用 SaveJob 持久化完整 job，包含 Stage 状态变更）
+	now := time.Now().UnixMilli()
+	job.Status = pb.JobStatusCancelled
+	job.UpdatedAt = now
+	job.CompletedAt = now
+	if err := s.store.SaveJob(job); err != nil {
 		return nil, status.Errorf(codes.Internal, "cancel job: %v", err)
 	}
 
@@ -528,6 +696,71 @@ func (s *Server) ReportUnitStatus(stream pb.Scheduler_ReportUnitStatusServer) er
 	}
 }
 
+// findStageByID 按 ID 查找 Stage
+func findStageByID(stages []*pb.Stage, id string) *pb.Stage {
+	for _, s := range stages {
+		if s.ID == id {
+			return s
+		}
+	}
+	return nil
+}
+
+// findStageByName 按名称查找 Stage
+func findStageByName(stages []*pb.Stage, name string) *pb.Stage {
+	for _, s := range stages {
+		if s.Name == name {
+			return s
+		}
+	}
+	return nil
+}
+
+// cancelDownstreamStages 级联标记所有下游 Stage 为 Skipped 并取消其 Unit
+// 当某个 Stage 失败时，依赖于它的所有下游 Stage 都无法继续执行。
+func (s *Server) cancelDownstreamStages(job *pb.Job, failedStageID string) {
+	// 构建依赖关系图：stageID → []下游stageID
+	downstream := make(map[string][]string)
+	for _, st := range job.Stages {
+		for _, dep := range st.DependsOn {
+			depStage := findStageByName(job.Stages, dep)
+			if depStage != nil {
+				downstream[depStage.ID] = append(downstream[depStage.ID], st.ID)
+			}
+		}
+	}
+
+	// BFS 遍历所有下游 Stage
+	queue := []string{failedStageID}
+	visited := map[string]bool{failedStageID: true}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, nextID := range downstream[current] {
+			if visited[nextID] {
+				continue
+			}
+			visited[nextID] = true
+			// 标记下游 Stage 为 Skipped
+			stage := findStageByID(job.Stages, nextID)
+			if stage != nil && stage.Status != pb.StageStatusCompleted && stage.Status != pb.StageStatusFailed && stage.Status != pb.StageStatusSkipped {
+				stage.Status = pb.StageStatusSkipped
+				s.store.UpdateStageStatus(stage.ID, pb.StageStatusSkipped)
+				// 取消该 Stage 的所有 Unit
+				stageUnits, err := s.store.ListUnitsByStage(stage.ID)
+				if err == nil {
+					for _, u := range stageUnits {
+						if u.Status == pb.UnitStatusPending || u.Status == pb.UnitStatusAssigned || u.Status == pb.UnitStatusRunning {
+							s.store.UpdateUnitStatus(u.ID, pb.UnitStatusCancelled, 0, "upstream stage failed")
+						}
+					}
+				}
+			}
+			queue = append(queue, nextID)
+		}
+	}
+}
+
 // propagateUnitStatus 检查 Unit 所属 Stage 和 Job 的状态
 func (s *Server) propagateUnitStatus(unit *pb.Unit) {
 	// 查找 Unit 所属的 Job
@@ -582,6 +815,16 @@ func (s *Server) propagateUnitStatus(unit *pb.Unit) {
 			stage.Status = newStageStatus
 			s.store.UpdateStageStatus(stage.ID, newStageStatus)
 		}
+
+		// 当 Stage 失败时，级联标记所有下游 Stage 为 Skipped 并取消其 Unit
+		if newStageStatus == pb.StageStatusFailed {
+			s.cancelDownstreamStages(job, stage.ID)
+			// 重新读取 job 以获取更新后的 stage 状态
+			updatedJob, err := s.store.GetJob(job.ID)
+			if err == nil {
+				job = updatedJob
+			}
+		}
 		break
 	}
 
@@ -627,7 +870,7 @@ func (s *Server) DeclareTrust(ctx context.Context, req *pb.DeclareTrustRequest) 
 		return nil, status.Errorf(codes.InvalidArgument, "self-trust is not allowed")
 	}
 
-	// 查找声明节点的公钥
+	// 查找声明节点的公钥（仅验证签名时需要）
 	node, err := s.store.GetNode(req.FromNodeID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "lookup node: %v", err)
@@ -635,12 +878,12 @@ func (s *Server) DeclareTrust(ctx context.Context, req *pb.DeclareTrustRequest) 
 	if node == nil {
 		return nil, status.Errorf(codes.NotFound, "node %s not found", req.FromNodeID)
 	}
-	if len(node.PublicKey) == 0 {
-		return nil, status.Errorf(codes.FailedPrecondition, "node %s has no public key registered", req.FromNodeID)
-	}
 
-	// 验证签名
+	// 验证签名（如果提供了签名，则必须验证公钥和签名）
 	if len(req.Signature) > 0 {
+		if len(node.PublicKey) == 0 {
+			return nil, status.Errorf(codes.FailedPrecondition, "node %s has no public key registered, cannot verify signature", req.FromNodeID)
+		}
 		if err := trustgraph.VerifyTrust(node.PublicKey, req.FromNodeID, req.TargetNodeID, req.Signature); err != nil {
 			return nil, status.Errorf(codes.PermissionDenied, "signature verification failed: %v", err)
 		}
@@ -668,7 +911,9 @@ func (s *Server) DeclareTrust(ctx context.Context, req *pb.DeclareTrustRequest) 
 	}
 	if err := s.store.SaveTrustEdge(edge); err != nil {
 		// 持久化失败时回滚内存状态
-		_ = s.trust.RemoveEdge(req.FromNodeID, req.TargetNodeID)
+		if rmErr := s.trust.RemoveEdge(req.FromNodeID, req.TargetNodeID); rmErr != nil {
+			log.Printf("failed to rollback trust edge %s->%s: %v", req.FromNodeID, req.TargetNodeID, rmErr)
+		}
 		return nil, status.Errorf(codes.Internal, "save trust edge: %v", err)
 	}
 
@@ -715,7 +960,9 @@ func (s *Server) RevokeTrust(ctx context.Context, req *pb.RevokeTrustRequest) (*
 	// 从 BoltDB 删除
 	if err := s.store.DeleteTrustEdge(req.FromNodeID, req.TargetNodeID); err != nil {
 		// 删除失败时回滚内存状态
-		_ = s.trust.AddEdge(req.FromNodeID, req.TargetNodeID, nil, nil)
+		if addErr := s.trust.AddEdge(req.FromNodeID, req.TargetNodeID, nil, nil); addErr != nil {
+			log.Printf("failed to rollback trust edge %s->%s after delete failure: %v", req.FromNodeID, req.TargetNodeID, addErr)
+		}
 		return nil, status.Errorf(codes.Internal, "delete trust edge: %v", err)
 	}
 
@@ -734,7 +981,7 @@ func (s *Server) GetTrustGraph(ctx context.Context, req *pb.GetTrustGraphRequest
 
 // ========== 证书管理 ==========
 
-// IssueCertificate 签发证书
+// IssueCertificate 签发证书（返回证书 + 私钥）
 func (s *Server) IssueCertificate(ctx context.Context, req *pb.IssueCertRequest) (*pb.IssueCertResponse, error) {
 	if s.ca == nil || !s.ca.IsCAValid() {
 		return nil, status.Errorf(codes.FailedPrecondition, "CA not initialized")
@@ -756,27 +1003,83 @@ func (s *Server) IssueCertificate(ctx context.Context, req *pb.IssueCertRequest)
 		groups = splitCSV(req.Group)
 	}
 
-	certPEM, _, err := s.ca.IssueNodeCert(req.NodeID, groups, ips)
+	certPEM, keyPEM, err := s.ca.IssueNodeCert(req.NodeID, groups, ips)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "issue cert: %v", err)
 	}
 
 	return &pb.IssueCertResponse{
 		Certificate:   certPEM,
-		// 返回私钥（IssueCertResponse 没有 key 字段，但可通过其他方式传递）
-		// P6 阶段：节点私钥通过 RegisterNodeResponse 返回
+		PrivateKey:    keyPEM,
 		CACertificate: s.ca.CACertPEM(),
 		ExpiresAt:     time.Now().Add(365 * 24 * time.Hour).UnixMilli(),
 	}, nil
 }
 
-// RenewCertificate 续期证书
+// RenewCertificate 续期证书（签发新证书覆盖旧证书）
 func (s *Server) RenewCertificate(ctx context.Context, req *pb.RenewCertRequest) (*pb.RenewCertResponse, error) {
-	return &pb.RenewCertResponse{ExpiresAt: time.Now().Add(24 * time.Hour).UnixMilli()}, nil
+	if s.ca == nil || !s.ca.IsCAValid() {
+		return nil, status.Errorf(codes.FailedPrecondition, "CA not initialized")
+	}
+	if req.NodeID == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "node_id is required")
+	}
+
+	// 查找节点信息（用于续期时保留原有分组和 IP）
+	node, err := s.store.GetNode(req.NodeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "lookup node: %v", err)
+	}
+	if node == nil {
+		return nil, status.Errorf(codes.NotFound, "node %s not found", req.NodeID)
+	}
+
+	// 使用默认分组签发新证书
+	groups := []string{"default"}
+	certPEM, _, err := s.ca.IssueNodeCert(req.NodeID, groups, nil)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "renew cert: %v", err)
+	}
+
+	return &pb.RenewCertResponse{
+		Certificate: certPEM,
+		ExpiresAt:   time.Now().Add(365 * 24 * time.Hour).UnixMilli(),
+	}, nil
 }
 
-// RevokeCertificate 吊销证书
+// RevokeCertificate 吊销节点证书（加入 CRL）
 func (s *Server) RevokeCertificate(ctx context.Context, req *pb.RevokeCertRequest) (*pb.RevokeCertResponse, error) {
+	if s.ca == nil || !s.ca.IsCAValid() {
+		return nil, status.Errorf(codes.FailedPrecondition, "CA not initialized")
+	}
+	if req.NodeID == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "node_id is required")
+	}
+
+	// 检查节点是否存在
+	node, err := s.store.GetNode(req.NodeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "lookup node: %v", err)
+	}
+	if node == nil {
+		return nil, status.Errorf(codes.NotFound, "node %s not found", req.NodeID)
+	}
+
+	// 检查是否已被吊销
+	alreadyRevoked, err := s.store.IsCertRevoked(req.NodeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "check crl: %v", err)
+	}
+	if alreadyRevoked {
+		return &pb.RevokeCertResponse{Success: true}, nil // idempotent
+	}
+
+	// 持久化吊销记录
+	if err := s.store.SaveRevokedCert(req.NodeID, req.Reason); err != nil {
+		return nil, status.Errorf(codes.Internal, "save to crl: %v", err)
+	}
+
+	log.Printf("certificate revoked: %s reason: %s", req.NodeID, req.Reason)
 	return &pb.RevokeCertResponse{Success: true}, nil
 }
 
@@ -961,12 +1264,48 @@ func (s *Server) ListNodes(ctx context.Context, req *pb.ListNodesRequest) (*pb.L
 	filtered := make([]*pb.Node, 0, len(nodes))
 	for _, n := range nodes {
 		if s.isNodeVisibleTo(n, req.RequesterID) {
-			filtered = append(filtered, n)
+			// 按 StatusFilter 过滤
+			if req.StatusFilter == pb.NodeStatusUnspecified || n.Status == req.StatusFilter {
+				filtered = append(filtered, n)
+			}
 		}
 	}
+
+	// 分页
+	offset := 0
+	if req.PageToken != "" {
+		decoded, err := base64.StdEncoding.DecodeString(req.PageToken)
+		if err == nil {
+			fmt.Sscanf(string(decoded), "%d", &offset)
+		}
+	}
+	pageSize := int(req.PageSize)
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+
+	end := offset + pageSize
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	if offset > len(filtered) {
+		offset = len(filtered)
+	}
+
+	page := filtered[offset:end]
+
+	var nextPageToken string
+	if end < len(filtered) {
+		nextPageToken = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d", end)))
+	}
+
 	return &pb.ListNodesResponse{
-		Nodes:      filtered,
-		TotalCount: int32(len(filtered)),
+		Nodes:         page,
+		TotalCount:    int32(len(filtered)),
+		NextPageToken: nextPageToken,
 	}, nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"computing-power/agent/internal/config"
 	agentcore "computing-power/agent/internal/core"
 	"computing-power/agent/internal/heartbeat"
+	"computing-power/agent/internal/container"
 	cpstartcfg "computing-power/agent/internal/cpstart/config"
 )
 
@@ -158,6 +159,15 @@ func (r *Runner) LastError() error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.lastErr
+}
+
+// SetRuntime 替换运行中 agent 的容器运行时（例如 WSL2 代理就绪后）
+func (r *Runner) SetRuntime(rt container.Runtime) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.agent != nil {
+		r.agent.SetRuntime(rt)
+	}
 }
 
 // LocalResources 返回本地资源信息

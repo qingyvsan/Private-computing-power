@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { listNodes, type Node } from '../api/client'
+import { ElMessageBox, ElMessage } from 'element-plus'
+import { listNodes, unregisterNode, type Node } from '../api/client'
 import { statusType } from '../utils/format'
 import { usePolling } from '../utils/usePolling'
 
@@ -28,6 +29,23 @@ const filteredNodes = computed(() => {
   const q = searchQuery.value.toLowerCase()
   return nodes.value.filter(n => n.name.toLowerCase().includes(q) || n.id.toLowerCase().includes(q))
 })
+
+async function handleUnregister(node: Node) {
+  try {
+    await ElMessageBox.confirm(
+      `确定要注销节点 "${node.name}" (${node.id}) 吗？\n此操作将从集群中移除该节点，其上的所有任务将被回收。`,
+      '注销节点',
+      { confirmButtonText: '确认注销', cancelButtonText: '取消', type: 'warning' }
+    )
+    await unregisterNode(node.id, 'user requested')
+    ElMessage.success(`节点 ${node.name} 已注销`)
+    await fetchNodes()
+  } catch (err: any) {
+    if (err !== 'cancel') {
+      ElMessage.error(err?.message || '注销失败')
+    }
+  }
+}
 
 </script>
 
@@ -62,9 +80,10 @@ const filteredNodes = computed(() => {
           </template>
         </el-table-column>
         <el-table-column prop="version" label="版本" width="100" />
-        <el-table-column label="操作" width="80" fixed="right">
+        <el-table-column label="操作" width="140" fixed="right">
           <template #default="{ row }">
             <el-button type="primary" link size="small" @click.stop="router.push('/nodes/' + row.id)">详情</el-button>
+            <el-button type="danger" link size="small" @click.stop="handleUnregister(row)">注销</el-button>
           </template>
         </el-table-column>
       </el-table>

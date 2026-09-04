@@ -8,6 +8,7 @@ import StepIdentity from './StepIdentity.vue'
 import StepResources from './StepResources.vue'
 import StepCheck from './StepCheck.vue'
 import StepWindows from './StepWindows.vue'
+import StepMacOS from './StepMacOS.vue'
 import StepComplete from './StepComplete.vue'
 
 const router = useRouter()
@@ -22,17 +23,26 @@ const config = ref({
 })
 const checkResults = ref<Record<string, any>>({})
 const wslSetupBusy = ref(false)
+const macosSetupBusy = ref(false)
 
 // Windows 步骤仅在 Windows + containerd 不可用时显示
 const showWindowsStep = computed(() => {
   return checkResults.value.os === 'windows' && !checkResults.value.containerd
 })
 
-// 步骤列表动态包含 Windows 步骤
+// macOS 步骤仅在 macOS + containerd 不可用时显示
+const showMacOSStep = computed(() => {
+  return checkResults.value.os === 'darwin' && !checkResults.value.containerd
+})
+
+// 步骤列表动态包含平台相关步骤
 const steps = computed(() => {
   const base = ['欢迎', '调度器', '身份', '资源', '检查']
   if (showWindowsStep.value) {
     base.push('Windows')
+  }
+  if (showMacOSStep.value) {
+    base.push('macOS')
   }
   base.push('完成')
   return base
@@ -93,13 +103,14 @@ async function finish() {
         <StepResources v-else-if="currentStep === 3" v-model:maxCpu="config.resources.max_cpu_cores" v-model:maxMem="config.resources.max_memory_mb" v-model:reportGpu="config.resources.report_gpu" />
         <StepCheck v-else-if="currentStep === 4" :results="checkResults" :loading="loading" />
         <StepWindows v-else-if="currentStep === 5 && showWindowsStep" :results="checkResults" v-model:busy="wslSetupBusy" @done="next" />
+        <StepMacOS v-else-if="currentStep === 5 && showMacOSStep" :results="checkResults" v-model:busy="macosSetupBusy" @done="next" />
         <StepComplete v-else-if="currentStep === steps.length - 1" />
       </div>
 
       <div style="display: flex; justify-content: space-between; margin-top: 16px;">
         <el-button v-if="currentStep > 0 && currentStep < steps.length - 1" @click="prev">上一步</el-button>
         <span v-else />
-        <el-button v-if="!isLast" type="primary" @click="next" :loading="loading || wslSetupBusy">下一步</el-button>
+        <el-button v-if="!isLast" type="primary" @click="next" :loading="loading || wslSetupBusy || macosSetupBusy">下一步</el-button>
         <el-button v-else type="primary" @click="finish" :loading="loading">进入控制台</el-button>
       </div>
     </el-card>

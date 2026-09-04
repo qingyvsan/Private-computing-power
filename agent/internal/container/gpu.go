@@ -143,7 +143,10 @@ func findNvidiaSmi() string {
 		"/usr/local/bin/nvidia-smi",
 		"/usr/lib/nvidia-smi",
 		"/opt/nvidia/bin/nvidia-smi",
-		"/run/current-system/sw/bin/nvidia-smi", // NixOS
+		"/run/current-system/sw/bin/nvidia-smi",   // NixOS
+		"/usr/local/nvidia/bin/nvidia-smi",         // macOS CUDA Toolkit
+		"/Library/CUDA/bin/nvidia-smi",             // macOS CUDA
+		"/usr/local/cuda/bin/nvidia-smi",           // macOS CUDA
 	}
 	for _, p := range commonPaths {
 		if fileExists(p) {

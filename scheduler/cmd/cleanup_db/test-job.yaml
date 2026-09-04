@@ -1,0 +1,11 @@
+name: test-container-job
+type: single
+image: python:3.11-slim
+stages:
+  - name: run
+    image: python:3.11-slim
+    script: |
+      echo "Hello from container job!"
+      echo "Node: $(hostname)"
+      python3 --version
+      echo "Container job completed successfully"

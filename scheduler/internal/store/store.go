@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -23,6 +24,7 @@ var (
 	bucketIndexJob  = []byte("index_job_by_owner")
 	bucketIndexNode = []byte("index_node_by_status")
 	bucketIPAM      = []byte("ipam")
+	bucketCRL       = []byte("crl")
 )
 
 // Store 是调度器的持久化层（BoltDB 实现）
@@ -54,7 +56,7 @@ func (s *Store) init() error {
 		buckets := [][]byte{
 			bucketNodes, bucketJobs, bucketUnits, bucketTrust,
 			bucketInvites, bucketMeta, bucketIndexJob, bucketIndexNode,
-			bucketIPAM,
+			bucketIPAM, bucketCRL,
 		}
 		for _, b := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
@@ -102,11 +104,14 @@ func (s *Store) ReadWALFrom(seq uint64) ([]*wal.Entry, error) {
 }
 
 // walWrite 写入 WAL 条目（仅在 WAL 启用且非回放模式时）
+// WAL 写入失败不会阻塞主流程，但会记录错误日志以便排查。
 func (s *Store) walWrite(entry wal.Entry) {
 	if !s.walEnabled || s.walWriter == nil || s.replaying {
 		return
 	}
-	s.walWriter.Write(entry)
+	if _, err := s.walWriter.Write(entry); err != nil {
+		log.Printf("wal: write entry (type=%d, key=%s): %v", entry.Type, entry.Key, err)
+	}
 }
 
 // SetReplaying 设置回放模式（回放时不写入 WAL，避免循环同步）
@@ -360,6 +365,24 @@ func (s *Store) ListUnitsByStage(stageID string) ([]*pb.Unit, error) {
 				return err
 			}
 			if u.StageID == stageID {
+				units = append(units, &u)
+			}
+			return nil
+		})
+	})
+	return units, err
+}
+
+// ListUnitsByNodeID 列出指定节点的所有 Unit
+func (s *Store) ListUnitsByNodeID(nodeID string) ([]*pb.Unit, error) {
+	var units []*pb.Unit
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketUnits).ForEach(func(k, v []byte) error {
+			var u pb.Unit
+			if err := json.Unmarshal(v, &u); err != nil {
+				return err
+			}
+			if u.AssignedNode == nodeID {
 				units = append(units, &u)
 			}
 			return nil
@@ -688,6 +711,56 @@ func mustJSON(v interface{}) []byte {
 		return []byte(fmt.Sprintf(`{"marshal_error":"%s"}`, err.Error()))
 	}
 	return data
+}
+
+// RevokedCert 记录已吊销的证书
+type RevokedCert struct {
+	NodeID    string `json:"node_id"`
+	Reason    string `json:"reason"`
+	RevokedAt int64  `json:"revoked_at"`
+}
+
+// SaveRevokedCert 持久化证书吊销记录
+func (s *Store) SaveRevokedCert(nodeID, reason string) error {
+	rec := RevokedCert{
+		NodeID:    nodeID,
+		Reason:    reason,
+		RevokedAt: time.Now().UnixMilli(),
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("marshal revoked cert: %w", err)
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketCRL).Put([]byte(nodeID), data)
+	})
+}
+
+// IsCertRevoked 检查指定节点的证书是否已被吊销
+func (s *Store) IsCertRevoked(nodeID string) (bool, error) {
+	var revoked bool
+	err := s.db.View(func(tx *bolt.Tx) error {
+		data := tx.Bucket(bucketCRL).Get([]byte(nodeID))
+		revoked = data != nil
+		return nil
+	})
+	return revoked, err
+}
+
+// ListRevokedCerts 列出所有已吊销的证书记录
+func (s *Store) ListRevokedCerts() ([]*RevokedCert, error) {
+	var list []*RevokedCert
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketCRL).ForEach(func(k, v []byte) error {
+			var rec RevokedCert
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return nil // skip corrupted entries
+			}
+			list = append(list, &rec)
+			return nil
+		})
+	})
+	return list, err
 }
 
 // Backup 创建 BoltDB 一致性快照

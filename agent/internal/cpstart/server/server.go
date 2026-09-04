@@ -85,3 +85,8 @@ func newStaticHandler() (http.Handler, error) {
 func (s *HTTPServer) ListenAddr() string {
 	return s.server.Addr
 }
+
+// Handler 返回 HTTP 处理器（用于访问 WSL2 automator 等组件）
+func (s *HTTPServer) Handler() *Handler {
+	return s.handler
+}

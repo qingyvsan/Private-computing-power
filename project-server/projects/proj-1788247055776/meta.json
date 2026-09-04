@@ -1,0 +1,8 @@
+{
+  "project_id": "proj-1788247055776",
+  "startup_command": "sh /workspace/main.sh",
+  "base_image": "alpine:latest",
+  "file_name": "test-project.zip",
+  "size": 412,
+  "created_at": 1788247055777
+}

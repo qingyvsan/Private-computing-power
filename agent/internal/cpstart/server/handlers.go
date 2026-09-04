@@ -18,7 +18,9 @@ import (
 	"computing-power/agent/internal/container"
 	"computing-power/agent/internal/cpstart/agent"
 	cpstartcfg "computing-power/agent/internal/cpstart/config"
+	"computing-power/agent/internal/cpstart/macos"
 	"computing-power/agent/internal/cpstart/wsl2"
+	"gopkg.in/yaml.v3"
 )
 
 // Handler REST API 处理器
@@ -27,16 +29,22 @@ type Handler struct {
 	runner    *agent.Runner
 	cfg       *cpstartcfg.Config
 	wsl2      *wsl2.Automator
+	macos     *macos.Automator
 	startTime time.Time
 }
 
 // NewHandler 创建 REST 处理器
 func NewHandler(bridge *Bridge, runner *agent.Runner, cfg *cpstartcfg.Config) *Handler {
 	return &Handler{
-		bridge:    bridge,
-		runner:    runner,
-		cfg:       cfg,
-		wsl2:      wsl2.New(),
+		bridge: bridge,
+		runner: runner,
+		cfg:    cfg,
+		wsl2: wsl2.New(wsl2.AutomatorConfig{
+			DistroName:       cfg.WSL2.DistroName,
+			InstallPath:      cfg.WSL2.InstallPath,
+			ContainerdSocket: cfg.WSL2.ContainerdSocket,
+		}),
+		macos:     macos.New(),
 		startTime: time.Now(),
 	}
 }
@@ -60,6 +68,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// 集群节点
 	mux.HandleFunc("GET /api/v1/nodes", h.listNodes)
 	mux.HandleFunc("GET /api/v1/nodes/{id}", h.getNode)
+	mux.HandleFunc("POST /api/v1/nodes/{id}/unregister", h.unregisterNode)
 
 	// 作业
 	mux.HandleFunc("GET /api/v1/jobs", h.listJobs)
@@ -79,6 +88,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// WSL2 自动配置
 	mux.HandleFunc("POST /api/v1/setup/wsl2/start", h.startWSL2)
 	mux.HandleFunc("GET /api/v1/setup/wsl2/status", h.wsl2Status)
+	mux.HandleFunc("GET /api/v1/setup/wsl2/config", h.wsl2Config)
+
+	// macOS 容器运行时自动配置
+	mux.HandleFunc("POST /api/v1/setup/macos/start", h.startMacOS)
+	mux.HandleFunc("GET /api/v1/setup/macos/status", h.macosStatus)
+
 	mux.HandleFunc("POST /api/v1/projects/upload", h.uploadProject)
 	mux.HandleFunc("GET /api/v1/projects/{id}/download", h.downloadProject)
 	mux.HandleFunc("GET /api/v1/projects/{id}/status", h.projectStatus)
@@ -114,9 +129,9 @@ func (h *Handler) setupStatus(w http.ResponseWriter, r *http.Request) {
 	configured := err == nil
 
 	writeOK(w, map[string]interface{}{
-		"configured": configured,
+		"configured":   configured,
 		"agent_status": h.runner.Status().String(),
-		"node_id":    h.runner.NodeID(),
+		"node_id":      h.runner.NodeID(),
 	})
 }
 
@@ -160,6 +175,17 @@ func (h *Handler) setupConfig(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Resources.ReportGPU = false
 	}
 
+	// WSL2 配置
+	if incoming.WSL2.InstallPath != "" {
+		h.cfg.WSL2.InstallPath = incoming.WSL2.InstallPath
+	}
+	if incoming.WSL2.DistroName != "" {
+		h.cfg.WSL2.DistroName = incoming.WSL2.DistroName
+	}
+	if incoming.WSL2.ContainerdSocket != "" {
+		h.cfg.WSL2.ContainerdSocket = incoming.WSL2.ContainerdSocket
+	}
+
 	// 保存配置
 	if err := h.cfg.Save(h.cfg.ConfigPath()); err != nil {
 		writeError(w, http.StatusInternalServerError, "save config: "+err.Error())
@@ -174,20 +200,22 @@ func (h *Handler) setupConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, map[string]string{
-		"status":   "configured",
-		"node_id":  h.runner.NodeID(),
-		"name":     h.cfg.Agent.Name,
-		"address":  h.cfg.Scheduler.Address,
+		"status":  "configured",
+		"node_id": h.runner.NodeID(),
+		"name":    h.cfg.Agent.Name,
+		"address": h.cfg.Scheduler.Address,
 	})
 }
 
 func (h *Handler) setupCheck(w http.ResponseWriter, r *http.Request) {
 	checks := map[string]interface{}{
-		"scheduler":     false,
-		"containerd":    false,
-		"gpu":           false,
-		"os":            runtime.GOOS,
-		"wsl_available": false,
+		"scheduler":         false,
+		"containerd":        false,
+		"gpu":               false,
+		"os":                runtime.GOOS,
+		"wsl_available":     false,
+		"container_backend": "none",
+		"brew_available":    false,
 	}
 
 	// 检查调度器连通性
@@ -204,10 +232,24 @@ func (h *Handler) setupCheck(w http.ResponseWriter, r *http.Request) {
 			checks["wsl_available"] = true
 		}
 		checks["containerd"] = false // Windows 原生不支持 containerd
+		checks["container_backend"] = "wsl2"
+	} else if runtime.GOOS == "darwin" {
+		// macOS 上检测容器后端（Colima / Docker Desktop / OrbStack）
+		backend := container.DetectBackend()
+		checks["container_backend"] = backend.Type
+		if backend.Type != "none" {
+			checks["containerd"] = true
+			checks["containerd_socket"] = backend.Socket
+		}
+		// 检测 Homebrew
+		if _, err := exec.LookPath("brew"); err == nil {
+			checks["brew_available"] = true
+		}
 	} else {
-		// Linux/macOS 上检查 containerd socket
+		// Linux 上检查 containerd socket
 		if _, err := os.Stat("/run/containerd/containerd.sock"); err == nil {
 			checks["containerd"] = true
+			checks["container_backend"] = "containerd"
 		}
 	}
 
@@ -224,11 +266,11 @@ func (h *Handler) setupCheck(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) localStatus(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]interface{}{
-		"node_id":     h.runner.NodeID(),
-		"agent_name":  h.cfg.Agent.Name,
+		"node_id":      h.runner.NodeID(),
+		"agent_name":   h.cfg.Agent.Name,
 		"agent_status": h.runner.Status().String(),
-		"scheduler":   h.cfg.Scheduler.Address,
-		"uptime_ms":   time.Since(h.startTime).Milliseconds(),
+		"scheduler":    h.cfg.Scheduler.Address,
+		"uptime_ms":    time.Since(h.startTime).Milliseconds(),
 	})
 }
 
@@ -241,17 +283,17 @@ func (h *Handler) localResources(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]interface{}{
-		"agent_name":       h.cfg.Agent.Name,
-		"scheduler":        h.cfg.Scheduler.Address,
-		"max_cpu_cores":    h.cfg.Resources.MaxCPUCores,
-		"max_memory_mb":    h.cfg.Resources.MaxMemoryMB,
-		"report_gpu":       h.cfg.Resources.ReportGPU,
-		"node_id":          h.runner.NodeID(),
-		"agent_status":     h.runner.Status().String(),
-		"data_dir":         h.cfg.Agent.DataDir,
-		"nebula_enabled":   h.cfg.Nebula.Enabled,
-		"hami_enabled":     h.cfg.HAMI.Enabled,
-		"updater_enabled":  h.cfg.Updater.Enabled,
+		"agent_name":      h.cfg.Agent.Name,
+		"scheduler":       h.cfg.Scheduler.Address,
+		"max_cpu_cores":   h.cfg.Resources.MaxCPUCores,
+		"max_memory_mb":   h.cfg.Resources.MaxMemoryMB,
+		"report_gpu":      h.cfg.Resources.ReportGPU,
+		"node_id":         h.runner.NodeID(),
+		"agent_status":    h.runner.Status().String(),
+		"data_dir":        h.cfg.Agent.DataDir,
+		"nebula_enabled":  h.cfg.Nebula.Enabled,
+		"hami_enabled":    h.cfg.HAMI.Enabled,
+		"updater_enabled": h.cfg.Updater.Enabled,
 	})
 }
 
@@ -292,13 +334,12 @@ func (h *Handler) updateResources(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, map[string]interface{}{
-		"status":         "updated",
-		"max_cpu_cores":  h.cfg.Resources.MaxCPUCores,
-		"max_memory_mb":  h.cfg.Resources.MaxMemoryMB,
-		"report_gpu":     h.cfg.Resources.ReportGPU,
+		"status":        "updated",
+		"max_cpu_cores": h.cfg.Resources.MaxCPUCores,
+		"max_memory_mb": h.cfg.Resources.MaxMemoryMB,
+		"report_gpu":    h.cfg.Resources.ReportGPU,
 	})
 }
-
 
 func (h *Handler) updateFeatures(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
@@ -373,6 +414,33 @@ func (h *Handler) getNode(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, resp.Node)
 }
 
+// unregisterNode 注销节点
+func (h *Handler) unregisterNode(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "node_id is required")
+		return
+	}
+	// 解析可选 reason
+	var reqBody struct {
+		Reason string `json:"reason"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+	}
+	resp, err := Unary(h.bridge, func(c pb.SchedulerServiceClient) (*pb.UnregisterNodeResponse, error) {
+		return c.UnregisterNode(r.Context(), &pb.UnregisterNodeRequest{
+			NodeID: id,
+			Reason: reqBody.Reason,
+		})
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, resp)
+}
+
 // ========== 作业 ==========
 
 func (h *Handler) listJobs(w http.ResponseWriter, r *http.Request) {
@@ -418,15 +486,22 @@ func (h *Handler) submitJob(w http.ResponseWriter, r *http.Request) {
 	var req pb.SubmitJobRequest
 	contentType := r.Header.Get("Content-Type")
 	if strings.Contains(contentType, "yaml") || strings.Contains(contentType, "x-yaml") {
-		// YAML 提交 — 需要解析为 Job
-		// 简化处理：客户端发送 JSON 格式的 SubmitJobRequest
-		writeError(w, http.StatusBadRequest, "YAML submission not yet supported via REST API; use JSON SubmitJobRequest")
-		return
+		// YAML 提交 — 解析 YAML 格式的 SubmitJobRequest
+		if err := yaml.Unmarshal(body, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "parse YAML request: "+err.Error())
+			return
+		}
 	}
 
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "parse request: "+err.Error())
 		return
+	}
+
+	// 自动填充 OwnerID：默认以本地节点作为作业所有者。
+	// 调度器据此判断"是否分配到自身节点"（allow_self_assignment=false 时不分配给自己）。
+	if req.Job != nil && req.Job.OwnerID == "" {
+		req.Job.OwnerID = h.runner.NodeID()
 	}
 
 	resp, err := Unary(h.bridge, func(c pb.SchedulerServiceClient) (*pb.SubmitJobResponse, error) {
@@ -568,9 +643,26 @@ func (h *Handler) redeemInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	writeOK(w, resp)
 }
+
 // ========== WSL2 自动配置 ==========
 
 func (h *Handler) startWSL2(w http.ResponseWriter, r *http.Request) {
+	// 解析可选 body 中的 install_path / distro_name 覆盖（UI 传入的安装目录）
+	if r.Body != nil {
+		body, _ := io.ReadAll(r.Body)
+		var overrides struct {
+			InstallPath string `json:"install_path"`
+			DistroName  string `json:"distro_name"`
+		}
+		if json.Unmarshal(body, &overrides) == nil {
+			if overrides.InstallPath != "" || overrides.DistroName != "" {
+				h.wsl2.SetConfig(wsl2.AutomatorConfig{
+					InstallPath: overrides.InstallPath,
+					DistroName:  overrides.DistroName,
+				})
+			}
+		}
+	}
 	if err := h.wsl2.Start(); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -581,6 +673,34 @@ func (h *Handler) startWSL2(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) wsl2Status(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, h.wsl2.Status())
 }
+
+func (h *Handler) wsl2Config(w http.ResponseWriter, r *http.Request) {
+	writeOK(w, map[string]interface{}{
+		"install_path":      h.cfg.WSL2.InstallPath,
+		"distro_name":       h.cfg.WSL2.DistroName,
+		"containerd_socket": h.cfg.WSL2.ContainerdSocket,
+	})
+}
+
+// WSL2Automator 返回 Handler 持有的 WSL2 自动配置器实例
+func (h *Handler) WSL2Automator() *wsl2.Automator {
+	return h.wsl2
+}
+
+// ========== macOS 容器运行时自动配置 ==========
+
+func (h *Handler) startMacOS(w http.ResponseWriter, r *http.Request) {
+	if err := h.macos.Start(); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeOK(w, map[string]string{"status": "started"})
+}
+
+func (h *Handler) macosStatus(w http.ResponseWriter, r *http.Request) {
+	writeOK(w, h.macos.Status())
+}
+
 // ========== 项目文件 ==========
 
 type projectMeta struct {
@@ -695,4 +815,3 @@ func (h *Handler) projectStatus(w http.ResponseWriter, r *http.Request) {
 	json.Unmarshal(metaData, &meta)
 	writeOK(w, meta)
 }
-

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getNode, type Node } from '../api/client'
+import { ElMessageBox, ElMessage } from 'element-plus'
+import { getNode, unregisterNode, type Node } from '../api/client'
 import { statusType, formatBytes } from '../utils/format'
 import { usePolling } from '../utils/usePolling'
 
@@ -27,13 +28,34 @@ function resourcePercent(used: number, total: number): number {
   if (!total) return 0
   return Math.round((used / total) * 100)
 }
+
+async function handleUnregister() {
+  if (!node.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确定要注销节点 "${node.value.name}" (${node.value.id}) 吗？\n此操作将从集群中移除该节点，其上的所有任务将被回收。`,
+      '注销节点',
+      { confirmButtonText: '确认注销', cancelButtonText: '取消', type: 'warning' }
+    )
+    await unregisterNode(node.value.id, 'user requested')
+    ElMessage.success(`节点 ${node.value.name} 已注销`)
+    router.push('/nodes')
+  } catch (err: any) {
+    if (err !== 'cancel') {
+      ElMessage.error(err?.message || '注销失败')
+    }
+  }
+}
 </script>
 
 <template>
   <div class="page-container">
     <div class="page-header">
       <el-button text @click="router.push('/nodes')">← 返回节点列表</el-button>
-      <h2 v-if="node">节点详情: {{ node.name }}</h2>
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <h2 v-if="node" style="margin: 0;">节点详情: {{ node.name }}</h2>
+        <el-button v-if="node" type="danger" size="small" @click="handleUnregister">注销节点</el-button>
+      </div>
     </div>
 
     <el-card v-loading="loading" v-if="node">

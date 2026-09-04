@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,15 +15,16 @@ import (
 
 // Manager 管理 Nebula 节点生命周期
 type Manager struct {
-	cfg       *Config
-	cmd       *exec.Cmd
-	cancel    context.CancelFunc
-	done      chan struct{}
-	mu        sync.Mutex
-	running   atomic.Bool
-	natType   atomic.Value // string
-	overlayIP atomic.Value // string
-	startTime time.Time
+	cfg           *Config
+	cmd           *exec.Cmd
+	cancel        context.CancelFunc
+	done          chan struct{}
+	mu            sync.Mutex
+	running       atomic.Bool
+	natType       atomic.Value // string
+	overlayIP     atomic.Value // string
+	startTime     time.Time
+	lighthouseAddr string
 }
 
 // Config Nebula 管理器配置
@@ -93,6 +95,7 @@ func (m *Manager) Configure(certPEM, keyPEM, caPEM []byte, overlayIP, lighthouse
 	}
 
 	m.overlayIP.Store(overlayIP)
+	m.lighthouseAddr = lighthouseAddr
 	log.Printf("nebula: configured for overlay IP %s, lighthouse %s", overlayIP, lighthouseAddr)
 	return nil
 }
@@ -151,6 +154,9 @@ func (m *Manager) Start() error {
 	// 监控进程
 	go m.monitor(cmd)
 
+	// 启动 NAT 类型检测
+	go m.detectNAT()
+
 	log.Printf("nebula: started (binary=%s, config=%s, pid=%d)", binaryPath, configPath, cmd.Process.Pid)
 	return nil
 }
@@ -199,6 +205,42 @@ func (m *Manager) Stop() error {
 // IsRunning 返回 Nebula 进程是否在运行
 func (m *Manager) IsRunning() bool {
 	return m.running.Load()
+}
+
+
+// detectNAT 定期检测 NAT 类型
+// 通过尝试连接 Lighthouse 判断 NAT 类型
+func (m *Manager) detectNAT() {
+	// 等待 Nebula 启动完成
+	time.Sleep(5 * time.Second)
+
+	for i := 0; i < 6; i++ { // 最多尝试 6 次（30 秒）
+		if !m.running.Load() {
+			return
+		}
+
+		if m.lighthouseAddr == "" {
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		// 尝试 TCP 连接 Lighthouse
+		conn, err := net.DialTimeout("tcp", m.lighthouseAddr, 3*time.Second)
+		if err == nil {
+			conn.Close()
+			// 可以直连 Lighthouse，判定为 Cone NAT
+			m.SetNATType("cone")
+			log.Printf("nebula: NAT type detected: cone (direct connection to lighthouse %s)", m.lighthouseAddr)
+			return
+		}
+
+		// 可能为 Symmetric NAT 或 Lighthouse 未就绪
+		log.Printf("nebula: NAT detection attempt %d: cannot reach lighthouse %s: %v", i+1, m.lighthouseAddr, err)
+		time.Sleep(5 * time.Second)
+	}
+
+	// 未能确定，保留 unknown
+	log.Printf("nebula: NAT type detection failed after 6 attempts, keeping 'unknown'")
 }
 
 // GetNATType 返回 NAT 类型

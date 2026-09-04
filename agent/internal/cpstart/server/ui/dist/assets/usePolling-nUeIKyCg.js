@@ -1,1 +1,0 @@
-import{n as i,L as s,j as f}from"./index-LpeY8U_5.js";function m(a,r,o=!0){const t=f(!1);let n=null;async function l(){try{await a()}catch{}}function e(){n===null&&(t.value=!0,o&&l(),n=setInterval(l,r))}function u(){n!==null&&(clearInterval(n),n=null),t.value=!1}return i(()=>{e()}),s(()=>{u()}),{start:e,stop:u,isPolling:t}}export{m as u};

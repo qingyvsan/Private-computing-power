@@ -21,8 +21,9 @@ func newTestEngine(t *testing.T) (*Engine, *trustgraph.Graph) {
 
 func makeNode(id string, status pb.NodeStatus, cpuUsage float64) *pb.Node {
 	return &pb.Node{
-		ID:     id,
-		Status: status,
+		ID:           id,
+		Status:       status,
+		Capabilities: []string{"container"},
 		Resources: &pb.NodeResources{
 			CPUCores:  8,
 			CPUUsage:  cpuUsage,
@@ -128,6 +129,68 @@ func TestFilterResources_NilNodeResources(t *testing.T) {
 	result := eng.filterResources(nodes, spec)
 	if len(result) != 0 {
 		t.Errorf("expected 0 nodes, got %d", len(result))
+	}
+}
+
+// ========== filterCapabilities ==========
+
+func TestFilterCapabilities_AllHaveCapability(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	nodes := []*pb.Node{
+		makeNode("n1", pb.NodeStatusOnline, 0.3),
+		makeNode("n2", pb.NodeStatusOnline, 0.3),
+	}
+	spec := &pb.ResourceSpec{RequiredCapabilities: []string{"container"}}
+	result := eng.filterCapabilities(nodes, spec)
+	if len(result) != 2 {
+		t.Errorf("expected 2 nodes, got %d", len(result))
+	}
+}
+
+func TestFilterCapabilities_MissingCapability(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	n1 := makeNode("n1", pb.NodeStatusOnline, 0.3)
+	n2 := makeNode("n2", pb.NodeStatusOnline, 0.3)
+	n2.Capabilities = []string{} // 显式空列表 → 无此能力（nil 表示老节点，默认有所有能力）
+	nodes := []*pb.Node{n1, n2}
+	spec := &pb.ResourceSpec{RequiredCapabilities: []string{"container"}}
+	result := eng.filterCapabilities(nodes, spec)
+	if len(result) != 1 {
+		t.Errorf("expected 1 node, got %d", len(result))
+	}
+	if result[0].ID != "n1" {
+		t.Errorf("expected n1, got %s", result[0].ID)
+	}
+}
+
+func TestFilterCapabilities_NilCapabilityIsLegacy(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	n1 := makeNode("n1", pb.NodeStatusOnline, 0.3)
+	n1.Capabilities = nil // nil 表示未上报能力的老节点，默认有所有能力
+	nodes := []*pb.Node{n1}
+	spec := &pb.ResourceSpec{RequiredCapabilities: []string{"container"}}
+	result := eng.filterCapabilities(nodes, spec)
+	if len(result) != 1 {
+		t.Errorf("expected 1 node (legacy nil capabilities pass), got %d", len(result))
+	}
+}
+
+func TestFilterCapabilities_NilSpec(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	nodes := []*pb.Node{makeNode("n1", pb.NodeStatusOnline, 0.3)}
+	result := eng.filterCapabilities(nodes, nil)
+	if len(result) != 1 {
+		t.Errorf("expected 1 node, got %d", len(result))
+	}
+}
+
+func TestFilterCapabilities_NoRequiredCapabilities(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	nodes := []*pb.Node{makeNode("n1", pb.NodeStatusOnline, 0.3)}
+	spec := &pb.ResourceSpec{}
+	result := eng.filterCapabilities(nodes, spec)
+	if len(result) != 1 {
+		t.Errorf("expected 1 node, got %d", len(result))
 	}
 }
 

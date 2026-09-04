@@ -42,6 +42,8 @@ type HAMiManager struct {
 
 	// 当前分配状态：physicalGPU UUID -> 已分配 MB
 	allocated map[string]int64
+	// 容器 GPU 分配记录：containerID -> GPU UUID -> 已分配 MB
+	containerAllocations map[string]map[string]int64
 	// 物理 GPU 列表缓存（测试可注入）
 	physicalGPUs []*pb.GPUDevice
 }
@@ -59,7 +61,8 @@ func NewHAMiManager(enabled bool, libPath, configDir string, defaultMemMB int64,
 		configDir:    configDir,
 		defaultMemMB: defaultMemMB,
 		defaultCores: defaultCores,
-		allocated:    make(map[string]int64),
+		allocated:            make(map[string]int64),
+			containerAllocations: make(map[string]map[string]int64),
 	}
 
 	// 创建配置目录
@@ -126,6 +129,11 @@ func (m *HAMiManager) AllocateGPUs(containerID string, memoryMB int64, cores int
 		c := candidates[i]
 		uuid := c.device.UUID
 		m.allocated[uuid] += memoryMB
+			// 记录容器分配
+			if m.containerAllocations[containerID] == nil {
+				m.containerAllocations[containerID] = make(map[string]int64)
+			}
+			m.containerAllocations[containerID][uuid] += memoryMB
 		allocs = append(allocs, GPUAllocation{
 			UUID:     uuid,
 			MemoryMB: memoryMB,
@@ -193,7 +201,19 @@ func (m *HAMiManager) ReleaseGPUs(containerID string) {
 		return
 	}
 
-	log.Printf("hami: released GPU allocations for container %s", containerID)
+	// 查找该容器的 GPU 分配记录并释放
+	if allocs, ok := m.containerAllocations[containerID]; ok {
+		for uuid, mem := range allocs {
+			m.allocated[uuid] -= mem
+			if m.allocated[uuid] <= 0 {
+				delete(m.allocated, uuid)
+			}
+		}
+		delete(m.containerAllocations, containerID)
+		log.Printf("hami: released GPU allocations for container %s (freed %d GPUs)", containerID, len(allocs))
+	} else {
+		log.Printf("hami: no GPU allocations found for container %s", containerID)
+	}
 }
 
 // CleanupVGPUConfig 删除指定容器的 vgpu.json 配置目录

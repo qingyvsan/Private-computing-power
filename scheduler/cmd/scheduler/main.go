@@ -97,15 +97,15 @@ func run(configPath string) error {
 		log.Printf("wal enabled: dir=%s role=%s", walDir, cfg.Sync.Role)
 
 		if cfg.Sync.Role == "primary" {
-			// 检查点管理器
-			checkpointInterval := parseDuration(cfg.Sync.CheckpointInterval, 5*time.Minute)
-			cp := server.NewCheckpointer(st, walDir, checkpointInterval)
-			cp.Start(ctx)
-
-			// Sync 服务（独立端口）
+			// Sync 服务（独立端口），先创建以便检查点管理器共享备机 ack
 			syncServer := grpc.NewServer(grpc.ForceServerCodecV2(pb.JSONCodec{}))
 			syncSvc := server.NewSyncService(st, walDir, cfg.Scheduler.ID)
 			pb.RegisterSyncServiceServer(syncServer, syncSvc)
+
+			// 检查点管理器（共享 SyncService 的备机 ack 信息，安全清理 WAL）
+			checkpointInterval := parseDuration(cfg.Sync.CheckpointInterval, 5*time.Minute)
+			cp := server.NewCheckpointer(st, walDir, checkpointInterval, syncSvc.MinStandbyAck, w.CurrentFileSeq)
+			cp.Start(ctx)
 			go func() {
 				syncLis, err := net.Listen("tcp", cfg.Sync.ListenAddr)
 				if err != nil {

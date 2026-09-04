@@ -36,6 +36,12 @@ type Engine struct {
 	pendingCommands map[string][]*pb.Command
 	commandsMu      sync.Mutex
 
+	// 调度互斥锁：保证 scheduleOnce() 同时只有一个实例运行
+	scheduleMu sync.Mutex
+
+	// 唤醒通道：ScheduleNow() 通过非阻塞发送触发立即调度
+	wakeCh chan struct{}
+
 	// 并发分配信号量
 	sem chan struct{}
 
@@ -69,6 +75,7 @@ func New(st *store.Store, reg *registry.Registry, trust *trustgraph.Graph,
 		maxConcurrent:   maxConcurrent,
 		weights:         weights,
 		pendingCommands: make(map[string][]*pb.Command),
+		wakeCh:          make(chan struct{}, 1),
 		sem:             make(chan struct{}, maxConcurrent),
 		ctx:             context.Background(),
 	}
@@ -90,6 +97,9 @@ func (e *Engine) Start(ctx context.Context) {
 				return
 			case <-ticker.C:
 				e.scheduleOnce()
+			case <-e.wakeCh:
+				// 被 ScheduleNow() 唤醒，执行一次立即调度
+				e.scheduleOnce()
 			}
 		}
 	}()
@@ -106,13 +116,19 @@ func (e *Engine) Stop() {
 }
 
 // ScheduleNow 触发立即调度（异步非阻塞）
+// 通过 wakeCh 通知调度循环，而非启动新的 goroutine，
+// 从而避免 scheduleOnce() 被并发执行导致 unit 重复分配。
 func (e *Engine) ScheduleNow() {
 	select {
 	case <-e.ctx.Done():
 		return
 	default:
 	}
-	go e.scheduleOnce()
+	select {
+	case e.wakeCh <- struct{}{}:
+	default:
+		// 通道已满说明已有一次待处理的唤醒，无需重复发送
+	}
 }
 
 // MaxRetries 返回最大重试次数
@@ -122,6 +138,14 @@ func (e *Engine) MaxRetries() int {
 
 // scheduleOnce 执行一次完整的调度周期
 func (e *Engine) scheduleOnce() {
+	// 互斥锁：保证同一时间只有一个调度周期在执行，
+	// 防止并发分配同一 unit 到多个节点。
+	e.scheduleMu.Lock()
+	defer e.scheduleMu.Unlock()
+
+	// 0. 回收孤立 Unit（节点离线后遗留的 Assigned/Running Unit）
+	e.reclaimStaleUnits()
+
 	// 1. 获取所有 Pending Unit
 	pendingUnits, err := e.store.ListUnitsByStatus(pb.UnitStatusPending)
 	if err != nil {
@@ -181,4 +205,47 @@ func (e *Engine) PopCommands(nodeID string) []*pb.Command {
 	cmds := e.pendingCommands[nodeID]
 	delete(e.pendingCommands, nodeID)
 	return cmds
+}
+
+// ========== 孤立 Unit 回收 ==========
+
+// reclaimStaleUnits 回收孤立 Unit（节点离线后遗留的 Assigned/Running Unit）
+// 被回收的 Unit 标记为 Failed（"node offline"），随后走正常 retry 机制重新分配。
+// 调用方需持有 scheduleMu 互斥锁。
+func (e *Engine) reclaimStaleUnits() {
+	// 获取所有 Assigned / Running 状态的 Unit
+	staleUnits, err := e.listActiveUnits()
+	if err != nil {
+		log.Printf("engine: list active units for reclaim: %v", err)
+		return
+	}
+	if len(staleUnits) == 0 {
+		return
+	}
+
+	now := time.Now().UnixMilli()
+	for _, u := range staleUnits {
+		node := e.registry.GetNode(u.AssignedNode)
+		// 节点不存在（已注销）或已离线 → 回收
+		if node == nil || node.Status == pb.NodeStatusOffline {
+			log.Printf("engine: reclaiming stale unit %s (node %s offline)", u.ID, u.AssignedNode)
+			if _, err := e.store.UpdateUnitStatus(u.ID, pb.UnitStatusFailed, 0,
+				"node offline, unit reclaimed at "+time.UnixMilli(now).Format("15:04:05")); err != nil {
+				log.Printf("engine: reclaim unit %s: %v", u.ID, err)
+			}
+		}
+	}
+}
+
+// listActiveUnits 列出所有 Assigned 和 Running 状态的 Unit
+func (e *Engine) listActiveUnits() ([]*pb.Unit, error) {
+	var result []*pb.Unit
+	for _, status := range []pb.UnitStatus{pb.UnitStatusAssigned, pb.UnitStatusRunning} {
+		units, err := e.store.ListUnitsByStatus(status)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, units...)
+	}
+	return result, nil
 }
