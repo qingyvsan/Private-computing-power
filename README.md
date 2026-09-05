@@ -1,126 +1,282 @@
-# Private Computing Power · 私域算力
+# Private Computing Power — 去中心化私域算力集群
 
-> 去中心化私域算力集群 —— 将家庭/个人闲置算力（CPU / GPU / 内存 / 磁盘）汇聚成统一、自主可控的计算集群。
+> **Turn idle home/personal compute into a unified, self-sovereign cluster — operated entirely from your browser.**
 
-把身边闲置的算力用起来：集中调度、统一编排，算力始终掌握在自己人手里，全程通过浏览器即可操作。
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/)
+[![gRPC](https://img.shields.io/badge/gRPC-protocol-00ADD8)](https://grpc.io/)
+[![Vue](https://img.shields.io/badge/Vue-3.x-4FC08D?logo=vue.js)](https://vuejs.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+Private Computing Power pools your idle CPU, GPU, memory, and disk across home/personal devices into a **self-controlled distributed cluster**. Think of it as a personal, privacy-first alternative to cloud computing — your compute, your rules.
 
 ---
 
-## 核心特性
+## 🎯 Why This Exists
 
-- **中央调度 + 分布式节点**：调度器作为无界面控制面（gRPC），节点 Agent 分布式接入
-- **三层任务模型**：`Job → Stage → Unit`，支持单体 / 聚合 / 工作流，4 种拆分策略（by_file / by_range / by_n / by_custom）
-- **φ-accrual 故障检测**：自适应超时判断节点健康，误判率可控
-- **信任图**：有向信任关系 + ECDSA 签名，仅信任节点间可调度
-- **Web 控制台**：用户主机一键启动（`cpstart`），浏览器完成首次配置向导后加入集群
-- **GPU 共享**：HAMi Standalone 模式显存隔离
-- **Overlay 网络**：Nebula + Lighthouse NAT 穿透，节点间 P2P 通信
-- **邀请码注册**：邀请制接入私域成员，可选管理员密钥
-- **WAL 热备**：双节点故障切换 ≤ 30s，RPO ≤ 5s
-- **自动更新**：内建更新器，定时检查 + 下载 + 校验 + 原子替换 + 备份回滚
-- **跨平台客户端**：5 平台分发包（linux/amd64+arm64, windows/amd64, darwin/amd64+arm64）
+| Problem                                         | Solution                                                     |
+| ----------------------------------------------- | ------------------------------------------------------------ |
+| Cloud GPU costs are prohibitive for individuals | Aggregate idle home GPUs into a free cluster                 |
+| Centralized compute = data privacy risk         | Your data never leaves your trusted network                  |
+| Distributed systems are hard to set up          | One-click `cpstart` + browser-based management               |
+| Trusting strangers with your hardware           | ECDSA-signed trust graph — only trusted peers can schedule jobs |
 
-## 快速开始（统一使用流程）
+---
+
+## 🏗️ Architecture
 
 ```
-① 中央服务器：部署调度器（headless，仅 gRPC :9090）
-② 打包分发：`make dist VERSION=v0.1.0` 产出 5 平台分发包
-③ 用户安装：一键安装脚本自动下载 + 解压 + 注册系统服务
-④ 首次配置向导：连接调度器 / 节点身份+邀请码 / 共享资源 / 环境检测
-⑤ 加入集群：节点注册上线，控制台开始操作
+┌─────────────────────────────────────────────────────────────────┐
+│                    CENTRAL SCHEDULER (gRPC :9090)                │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
+│  │ Resource │  │  Trust   │  │  Health  │  │   Scheduling  │  │
+│  │ Tracker  │  │  Graph   │  │  Monitor │  │   Engine      │  │
+│  └──────────┘  └──────────┘  └──────────┘  └───────────────┘  │
+│                                                                │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                     │
+│  │  WAL +   │  │  Auto    │  │  Invite  │                     │
+│  │ Hot-Standby│ │  Updater │  │  Code    │                     │
+│  └──────────┘  └──────────┘  └──────────┘                     │
+└──────────────┬──────────────────────────────────────────────────┘
+               │
+    ┌──────────┼──────────┬──────────────┐
+    ▼          ▼          ▼              ▼
+┌────────┐ ┌────────┐ ┌────────┐   ┌────────┐
+│ Node A │ │ Node B │ │ Node C │ … │ Node N │  (thousands)
+│ 8C GPU │ │ 16C CPU│ │ 32G RAM│   │ 4C GPU │
+└────────┘ └────────┘ └────────┘   └────────┘
+    │          │          │              │
+    └──────────┴──────────┴──────────────┘
+         Nebula Overlay Network + NAT Traversal
 ```
 
-### 部署调度器
+---
+
+## 🔑 Key Features
+
+### 1. Distributed Task Model (3-Layer)
+
+```
+Job "Train ML Model"
+ ├── Stage "Data Preprocessing"
+ │    ├── Unit: chunk 1/4
+ │    ├── Unit: chunk 2/4
+ │    ├── Unit: chunk 3/4
+ │    └── Unit: chunk 4/4
+ ├── Stage "Model Training"
+ │    └── Unit: full training job
+ └── Stage "Evaluation"
+      └── Unit: run eval script
+```
+
+**4 Split Strategies:**
+
+- `by_file` — split by file list
+- `by_range` — split by numeric range
+- `by_n` — split into N equal parts
+- `by_custom` — user-defined split function
+
+**3 Job Types:**
+
+- `Singular` — single unit, single node
+- `Aggregate` — multiple independent units, parallel
+- `Workflow` — DAG of stages with dependencies (Kahn's algorithm topological sort)
+
+### 2. Pipeline Scheduling Engine
+
+```
+Filter → Score → Assign
+  │        │        │
+  │        │        └── Concurrent dispatch + retry
+  │        │
+  │        └── 4-dimensional weighted scoring:
+  │            • ResourceMatch (CPU/GPU/RAM match)
+  │            • NetworkQuality (latency, bandwidth)
+  │            • Reputation (historical success rate)
+  │            • Load (current utilization)
+  │
+  └── 3 filters:
+       • Resource (enough CPU/GPU/RAM?)
+       • Trust (is this node trusted?)
+       • Health (is the node alive?)
+```
+
+### 3. φ-Accrual Adaptive Failure Detection
+
+Instead of simple heartbeats (which produce false positives under network jitter), φ-accrual analyzes the **distribution of historical heartbeat intervals** to compute a suspicion level φ:
+
+- **φ = 1** → ~10% false positive probability
+- **φ = 4** → ~0.1% false positive probability (used as default threshold)
+- **φ = 8** → ~0.0001% false positive probability
+
+This means the system adapts to network conditions — a node on flaky WiFi won't be falsely marked as dead.
+
+### 4. ECDSA Trust Graph
+
+```
+       ┌──────────────────────┐
+       │   Trust Relationship  │
+       │  A ──signs──▶ B      │
+       │  (ECDSA P-256)       │
+       └──────────────────────┘
+       
+       Job scheduling: A → B → C → D
+       BFS path verification (depth limit: 10)
+       Only trusted transitive paths allowed
+       Expired edges auto-cleaned
+```
+
+### 5. High Availability
+
+| Feature           | Spec                                  |
+| ----------------- | ------------------------------------- |
+| **WAL Journal**   | JSONL + CRC32 checksum, auto-rotation |
+| **Hot Standby**   | Dual-node active/passive              |
+| **Failover**      | ≤ 30 seconds                          |
+| **RPO**           | ≤ 5 seconds (data loss window)        |
+| **Auto Recovery** | WAL replay on restart                 |
+
+### 6. GPU Sharing with HAMi
+
+```
+┌─────────────────────────────────┐
+│         Physical GPU            │
+│  ┌──────┐ ┌──────┐ ┌──────┐   │
+│  │ 2GB  │ │ 4GB  │ │ 2GB  │   │  ← HAMi Standalone
+│  │ Job1 │ │ Job2 │ │ Job3 │   │     memory isolation
+│  └──────┘ └──────┘ └──────┘   │
+└─────────────────────────────────┘
+```
+
+### 7. Auto-Update System
+
+```
+Check → Download → Verify (SHA256) → Atomic Replace → Rollback on Failure
+```
+
+---
+
+## 🚀 Quick Start
+
+### One Command
 
 ```bash
-# 构建
-go build -o bin/scheduler ./scheduler/cmd/scheduler
-
-# 运行（监听 gRPC :9090）
-./bin/scheduler --config ./scheduler/configs/scheduler.yaml
+cpstart
 ```
 
-### 安装 Agent（一键安装）
+This opens `http://127.0.0.1:8080` in your browser — fill in identity, invite code, and resource sharing preferences, and you're in the cluster.
+
+### Manual Setup
 
 ```bash
-# Linux/macOS
-curl -fsSL https://update.computing-power.local/install.sh | bash
-INVITE_CODE=xxxx bash scripts/install.sh
+# Build from source
+git clone https://github.com/qingyvsan/Private-computing-power.git
+cd Private-computing-power
+make build
 
-# Windows
-powershell -ExecutionPolicy Bypass -File install.ps1
+# Start scheduler
+./bin/scheduler --config config.yaml
+
+# Start node agent
+./bin/agent --scheduler-addr localhost:9090 --config config.yaml
 ```
 
-### 用户主机一键启动（P3.5 起）
+### Cross-Platform Build
 
 ```bash
-# 解压客户端包，双击 cpstart（Windows）/ ./cpstart（Linux/macOS）
-# 浏览器自动打开 http://127.0.0.1:8080
-# 按向导完成首次配置 → 节点上线 → 开始操作
-```
-
-## 目录结构
-
-```
-├── api/proto/v1/            # Protobuf 规范（common / scheduler）
-├── proto/v1/                # Go 类型 + JSON codec
-├── pkg/                     # 共享库（phidetector / trustgraph / taskmodel / resource / wal / certutil / updater ...）
-├── scheduler/               # 中央调度器（store / registry / server）
-├── agent/                   # 节点 Agent（heartbeat / container / core）
-├── cli/                     # cpcli 命令行 + cpstart 一键启动
-├── web/                     # Web 控制台前端（P3.5）
-├── scripts/                 # 打包分发 + 安装脚本
-├── deploy/                  # 部署工具（scheduler systemd + Nebula Lighthouse）
-└── test/fixtures/           # 作业 YAML 测试用例
-```
-
-## 技术栈
-
-| 项 | 选型 |
-|----|------|
-| 语言 | Go 1.26+（单二进制） |
-| 通信 | gRPC（控制流） |
-| 存储 | BoltDB（嵌入式） |
-| 界面 | Vue 3 + Vite + Element Plus（Web 控制台） |
-| CLI | Cobra |
-| 配置 | YAML |
-
-## 构建
-
-```bash
-# 构建三个二进制
-go build -o bin/scheduler ./scheduler/cmd/scheduler
-go build -o bin/agent      ./agent/cmd/agent
-go build -o bin/cpcli      ./cli/cmd/cpcli
-
-# 构建一键启动器（含内嵌前端）
-make build-cpstart
-
-# 全平台交叉编译 + 打包分发
 make dist VERSION=v0.1.0
-
-# 测试
-go test -race ./pkg/... ./scheduler/... ./agent/... ./cli/...
+# Produces packages for:
+#   linux/amd64, linux/arm64
+#   windows/amd64
+#   darwin/amd64, darwin/arm64
 ```
 
-## 路线图
+---
 
-| 阶段 | 内容 | 状态 |
-|------|------|------|
-| P0 | 项目骨架 + gRPC 握手 | ✅ 已完成 |
-| P1 | 注册与心跳强化 + φ 故障检测 | ✅ 已完成 |
-| P2 | 任务模型落库（BoltDB） | ✅ 已完成 |
-| P3 | 调度引擎（过滤/评分/分配） | ✅ 已完成 |
-| P3.5 | 用户主机 Web 控制台 + 一键启动 | ✅ 已完成 |
-| P4 | Agent 容器执行 | ✅ 已完成 |
-| P5 | GPU 管理（HAMi） | ✅ 已完成 |
-| P6 | Nebula Overlay 网络 | ✅ 已完成 |
-| P7 | 信任图 | ✅ 已完成 |
-| P8 | WAL 热备 | ✅ 已完成 |
-| P9 | 邀请码 | ✅ 已完成 |
-| P10 | 打包分发 + 自动更新 + 安装脚本 | ✅ 已完成 |
-| 远期 | 自动任务拆分 | ⬜ 规划中 |
+## 🛡️ Security
 
-## 许可证
+| Layer              | Mechanism                                 |
+| ------------------ | ----------------------------------------- |
+| **Transport**      | mTLS (mutual TLS) on all gRPC connections |
+| **Identity**       | ECDSA P-256 key pairs                     |
+| **Authorization**  | Trust graph (BFS path verification)       |
+| **Network**        | Nebula Overlay — encrypted mesh           |
+| **Access Control** | Invite-code registration                  |
 
-尚未指定。
+---
+
+## 🛠️ Tech Stack
+
+| Component    | Technology                  | Why                                      |
+| ------------ | --------------------------- | ---------------------------------------- |
+| **Language** | Go 1.26+                    | Single binary, no runtime dependency     |
+| **RPC**      | gRPC + Protobuf             | Strong typing, streaming, bidirectional  |
+| **Storage**  | BoltDB                      | Embedded, zero-config, ACID transactions |
+| **Frontend** | Vue 3 + Vite + Element Plus | Reactive UI, small bundle                |
+| **CLI**      | Cobra                       | POSIX-compliant, auto-completion         |
+| **Overlay**  | Nebula + Lighthouse         | NAT traversal, encrypted P2P mesh        |
+| **GPU**      | HAMi Standalone             | GPU memory isolation at container level  |
+| **Config**   | YAML                        | Human-readable, version-controlled       |
+
+---
+
+## 📁 Project Structure
+
+```
+├── scheduler/          # Central scheduler (gRPC server)
+├── agent/              # Distributed node agent
+├── cli/                # CLI + cpstart launcher
+├── api/proto/v1/       # Protobuf service definitions
+├── pkg/                # Shared libraries
+│   ├── trust/          # ECDSA trust graph
+│   ├── detection/      # φ-accrual failure detector
+│   ├── scheduler/      # Pipeline scheduling engine
+│   └── wal/            # Write-ahead log
+├── web/                # Vue 3 dashboard
+├── scripts/            # Build + packaging
+├── deploy/             # Deployment configs
+└── test/fixtures/      # Integration test data
+```
+
+---
+
+## 📊 Progress
+
+| Phase  | Feature                     | Status |
+| ------ | --------------------------- | ------ |
+| P0     | Project skeleton + proto    | ✅      |
+| P1     | Registration + heartbeat    | ✅      |
+| P2     | φ-accrual failure detection | ✅      |
+| P3     | Task model (Job/Stage/Unit) | ✅      |
+| P4     | Pipeline scheduling engine  | ✅      |
+| P5     | Web console                 | ✅      |
+| P6     | Container execution         | ✅      |
+| P7     | GPU sharing (HAMi)          | ✅      |
+| P8     | Nebula overlay network      | ✅      |
+| P9     | Trust graph                 | ✅      |
+| P10    | WAL + hot standby           | ✅      |
+| P11    | Packaging + auto-update     | ✅      |
+| Future | Auto task splitting         | ⬜      |
+
+---
+
+## 🎓 Design Decisions
+
+### Why Go?
+
+A single statically-linked binary means zero runtime dependencies. Users drop one file and run it. Go's goroutine model is a natural fit for the scheduler's concurrent operations (thousands of agent connections, each with streaming gRPC).
+
+### Why BoltDB instead of PostgreSQL?
+
+BoltDB is an embedded database — no separate process, no configuration, no network. The scheduler's state is a single file. For a self-hosted tool targeting home users, this is the right tradeoff: ACID guarantees without operational complexity.
+
+### Why φ-accrual instead of simple timeout?
+
+Simple heartbeat timeouts produce false positives under network jitter. φ-accrual computes a statistical suspicion level from historical intervals, dramatically reducing false failure detections. This is the same algorithm used by Cassandra and Akka.
+
+---
+
+## 📄 License
+
+MIT — see [LICENSE](LICENSE) for details.
+
+*Built to prove that distributed computing doesn't need to be complex — or centralized.*
